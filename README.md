@@ -9,7 +9,7 @@ AI-powered React component generator with live preview.
 
 ## Setup
 
-1. **Optional** Edit `.env` and replace `your-api-key-here` with your Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys):
+1. **Optional** Edit `.env.local` and replace `your-api-key-here` with your Anthropic API key from [console.anthropic.com](https://console.anthropic.com/settings/keys):
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
