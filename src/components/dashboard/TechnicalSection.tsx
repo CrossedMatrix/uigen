@@ -111,9 +111,45 @@ export const TECHNICALS_MOCK: TechnicalRow[] = [
     support1: 102.50,
     resistance1: 106.00,
     resistance2: 108.00,
-    ma50: 104.80,   // above price
-    ma200: 105.20,  // above MA50 → Death Cross
+    ma50: 104.80,
+    ma200: 105.20,  // Death Cross: MA50 < MA200
     rsi14: 46.8,
+  },
+  {
+    symbol: 'CL=F',
+    shortName: 'CRUDE',
+    price: 78.24,
+    support2: 68.00,
+    support1: 74.50,
+    resistance1: 82.00,
+    resistance2: 88.00,
+    ma50: 76.40,
+    ma200: 79.80,   // MA50 < MA200 → Death Cross
+    rsi14: 48.2,
+  },
+  {
+    symbol: 'SOXX',
+    shortName: 'SOXX',
+    price: 218.40,
+    support2: 195.00,
+    support1: 208.00,
+    resistance1: 225.00,
+    resistance2: 240.00,
+    ma50: 211.20,
+    ma200: 196.80,
+    rsi14: 61.4,
+  },
+  {
+    symbol: 'EWY',
+    shortName: 'KOREA',
+    price: 58.72,
+    support2: 52.00,
+    support1: 56.00,
+    resistance1: 61.50,
+    resistance2: 66.00,
+    ma50: 56.80,
+    ma200: 58.10,   // MA50 < MA200 → Death Cross
+    rsi14: 52.3,
   },
 ]
 

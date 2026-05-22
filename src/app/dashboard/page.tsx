@@ -9,8 +9,11 @@ import {
   type RatioCard,
 } from '@/components/dashboard/TechnicalSection'
 import { InstitutionalFlowsSection } from '@/components/dashboard/InstitutionalFlowsSection'
+import { OptionsSection } from '@/components/dashboard/OptionsSection'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+type Timeframe = '1D' | '5D' | '1M' | '3M'
 
 interface Instrument {
   symbol: string
@@ -21,6 +24,18 @@ interface Instrument {
   high?: number
   low?: number
   sparkline: number[]
+  sparklines?: Record<Timeframe, number[]>
+}
+
+interface FuturesInstrument {
+  symbol: string
+  name: string
+  price: number
+  change: number
+  changePercent: number
+  high?: number
+  low?: number
+  sparklines: Record<Timeframe, number[]>
 }
 
 interface VolatilityData {
@@ -31,6 +46,7 @@ interface VolatilityData {
 }
 
 interface MarketData {
+  futures?: FuturesInstrument[]
   equities: Instrument[]
   rates: Instrument[]
   fx: Instrument[]
@@ -160,13 +176,42 @@ function LiveClock() {
   )
 }
 
+// ─── Timeframe Bar ────────────────────────────────────────────────────────────
+
+function TimeframeBar({ value, onChange }: { value: Timeframe; onChange: (tf: Timeframe) => void }) {
+  const tfs: Timeframe[] = ['1D', '5D', '1M', '3M']
+  return (
+    <div className="flex items-center gap-1 bg-[#080d18] border border-[#1a2540] rounded-lg p-0.5">
+      {tfs.map((tf) => (
+        <button
+          key={tf}
+          onClick={() => onChange(tf)}
+          className={cn(
+            'text-[10px] font-mono px-2.5 py-1 rounded-md transition-colors font-semibold tracking-wider',
+            value === tf
+              ? 'bg-amber-400/15 text-amber-400 border border-amber-400/30'
+              : 'text-slate-600 hover:text-slate-400',
+          )}
+        >
+          {tf}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // ─── Ticker Tape ──────────────────────────────────────────────────────────────
 
 function TickerTape({ data }: { data: MarketData | null }) {
   if (!data) return <div className="h-7 bg-[#080c15] border-b border-[#1a2540]" />
 
+  // Prefer futures for the leading indices
+  const leadItems = data.futures?.length
+    ? data.futures.map((f) => ({ ...f, sparkline: [] }))
+    : data.equities
+
   const items = [
-    ...data.equities,
+    ...leadItems,
     ...data.fx.slice(0, 4),
     ...data.commodities,
     data.volatility.vix,
@@ -222,6 +267,56 @@ function EquityCard({ inst }: { inst: Instrument }) {
       </div>
 
       <Sparkline data={inst.sparkline} positive={up} w={140} h={36} />
+
+      {inst.high != null && inst.low != null && (
+        <div className="flex justify-between text-[10px] text-slate-700 font-mono">
+          <span>L {fmtPrice(inst.low)}</span>
+          <span>H {fmtPrice(inst.high)}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Futures Card ─────────────────────────────────────────────────────────────
+
+const FUTURES_META: Record<string, { label: string; underlying: string }> = {
+  'ES=F':  { label: 'ES',  underlying: 'S&P 500 E-Mini' },
+  'NQ=F':  { label: 'NQ',  underlying: 'NASDAQ 100 E-Mini' },
+  'YM=F':  { label: 'YM',  underlying: 'DOW JONES E-Mini' },
+  'RTY=F': { label: 'RTY', underlying: 'Russell 2000 Mini' },
+}
+
+function FuturesCard({ inst, timeframe }: { inst: FuturesInstrument; timeframe: Timeframe }) {
+  const up = inst.changePercent >= 0
+  const spark = inst.sparklines[timeframe] ?? []
+  const meta = FUTURES_META[inst.symbol]
+
+  return (
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 hover:border-[#2a3f64] transition-colors flex flex-col gap-3">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-mono text-amber-400/80 tracking-widest uppercase">{meta?.label ?? inst.symbol}</span>
+            <span className="text-[8px] font-mono text-slate-700 border border-slate-800 px-1 rounded">FUT</span>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-0.5">{meta?.underlying ?? inst.name}</div>
+        </div>
+        <span className={cn('text-[11px] font-mono px-1.5 py-0.5 rounded-md font-medium', changeBg(inst.changePercent))}>
+          {fmtPct(inst.changePercent)}
+        </span>
+      </div>
+
+      <div>
+        <div className="font-mono text-2xl font-semibold text-slate-100 tabular-nums leading-none">
+          {fmtPrice(inst.price)}
+        </div>
+        <div className={cn('text-xs font-mono mt-0.5 tabular-nums', changeColor(inst.change))}>
+          {fmtChange(inst.change)}
+        </div>
+      </div>
+
+      <Sparkline data={spark} positive={up} w={140} h={36} />
 
       {inst.high != null && inst.low != null && (
         <div className="flex justify-between text-[10px] text-slate-700 font-mono">
@@ -332,22 +427,31 @@ const FLAG: Record<string, string> = {
   'DXY': '🇺🇸',
 }
 
-function FXTable({ fx }: { fx: Instrument[] }) {
+function FXTable({ fx, timeframe }: { fx: Instrument[]; timeframe: Timeframe }) {
   return (
     <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4">
       <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest mb-3">FX Markets</h3>
 
       <div className="divide-y divide-[#1a2540]/60">
-        {fx.map((pair) => (
-          <div key={pair.symbol} className="flex items-center py-2 gap-2">
-            <span className="text-base w-6">{FLAG[pair.name] ?? '🌐'}</span>
-            <span className="text-xs text-slate-300 font-mono flex-1">{pair.name}</span>
-            <span className="font-mono text-sm text-slate-100 tabular-nums">{fmtPrice(pair.price)}</span>
-            <span className={cn('font-mono text-xs w-16 text-right tabular-nums', changeColor(pair.changePercent))}>
-              {fmtPct(pair.changePercent)}
-            </span>
-          </div>
-        ))}
+        {fx.map((pair) => {
+          const spark = pair.sparklines?.[timeframe] ?? pair.sparkline ?? []
+          const up = pair.changePercent >= 0
+          return (
+            <div key={pair.symbol} className="flex items-center py-2 gap-2">
+              <span className="text-base w-6">{FLAG[pair.name] ?? '🌐'}</span>
+              <span className="text-xs text-slate-300 font-mono flex-1">{pair.name}</span>
+              {spark.length > 1 && (
+                <div className="shrink-0">
+                  <Sparkline data={spark} positive={up} w={48} h={20} />
+                </div>
+              )}
+              <span className="font-mono text-sm text-slate-100 tabular-nums">{fmtPrice(pair.price)}</span>
+              <span className={cn('font-mono text-xs w-16 text-right tabular-nums', changeColor(pair.changePercent))}>
+                {fmtPct(pair.changePercent)}
+              </span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -373,25 +477,34 @@ const COMM_UNIT: Record<string, string> = {
   'NG=F': '$/MMBtu',
 }
 
-function CommodityTable({ commodities }: { commodities: Instrument[] }) {
+function CommodityTable({ commodities, timeframe }: { commodities: Instrument[]; timeframe: Timeframe }) {
   return (
     <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4">
       <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest mb-3">Commodities</h3>
 
       <div className="divide-y divide-[#1a2540]/60">
-        {commodities.map((c) => (
-          <div key={c.symbol} className="flex items-center py-2 gap-2">
-            <span className="text-base w-6">{COMM_ICON[c.symbol] ?? '•'}</span>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs text-slate-300 font-mono">{c.name}</div>
-              <div className="text-[10px] text-slate-700">{COMM_UNIT[c.symbol]}</div>
+        {commodities.map((c) => {
+          const spark = c.sparklines?.[timeframe] ?? c.sparkline ?? []
+          const up = c.changePercent >= 0
+          return (
+            <div key={c.symbol} className="flex items-center py-2 gap-2">
+              <span className="text-base w-6">{COMM_ICON[c.symbol] ?? '•'}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-slate-300 font-mono">{c.name}</div>
+                <div className="text-[10px] text-slate-700">{COMM_UNIT[c.symbol]}</div>
+              </div>
+              {spark.length > 1 && (
+                <div className="shrink-0">
+                  <Sparkline data={spark} positive={up} w={48} h={20} />
+                </div>
+              )}
+              <span className="font-mono text-sm text-slate-100 tabular-nums">{fmtPrice(c.price)}</span>
+              <span className={cn('font-mono text-xs w-16 text-right tabular-nums', changeColor(c.changePercent))}>
+                {fmtPct(c.changePercent)}
+              </span>
             </div>
-            <span className="font-mono text-sm text-slate-100 tabular-nums">{fmtPrice(c.price)}</span>
-            <span className={cn('font-mono text-xs w-16 text-right tabular-nums', changeColor(c.changePercent))}>
-              {fmtPct(c.changePercent)}
-            </span>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -648,6 +761,9 @@ export default function DashboardPage() {
   const [data, setData] = useState<MarketData | null>(null)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [usingFallback, setUsingFallback] = useState(false)
+  const [equityTF, setEquityTF] = useState<Timeframe>('1D')
+  const [fxTF,     setFxTF]     = useState<Timeframe>('1D')
+  const [commTF,   setCommTF]   = useState<Timeframe>('1D')
 
   const load = useCallback(async () => {
     try {
@@ -681,16 +797,16 @@ export default function DashboardPage() {
       <header className="sticky top-0 z-50 bg-[#070b14]/95 backdrop-blur-sm border-b border-[#1a2540]">
         <div className="max-w-screen-2xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            {/* Status dot */}
             <div
               className={cn('w-2 h-2 rounded-full shrink-0', data?.isMarketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600')}
               style={data?.isMarketOpen ? { boxShadow: '0 0 8px #34d399' } : undefined}
             />
             <h1
-              className="font-mono text-base font-bold tracking-[0.2em] text-slate-100 uppercase"
+              className="font-mono text-base font-bold tracking-[0.18em] uppercase"
               style={{ fontFamily: 'var(--font-geist-mono)' }}
             >
-              Market<span className="text-amber-400">Pulse</span>
+              <span className="text-slate-100">CROSSED</span>
+              <span className="text-amber-400 ml-2">MATRIX</span>
             </h1>
             {data && (
               <span
@@ -734,31 +850,57 @@ export default function DashboardPage() {
           <DashboardSkeleton />
         ) : (
           <>
-            {/* Equities */}
+            {/* Futures / Equity Indices */}
             <section>
-              <div
-                className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-2"
-                style={{ fontFamily: 'var(--font-geist-mono)' }}
-              >
-                Equity Indices
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">
+                  {data.futures?.length ? 'Index Futures · Continuous Front Month' : 'Equity Indices'}
+                </div>
+                <TimeframeBar value={equityTF} onChange={setEquityTF} />
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                {data.equities.map((e) => (
+                {(data.futures?.length ? data.futures : null)?.map((f) => (
+                  <FuturesCard key={f.symbol} inst={f} timeframe={equityTF} />
+                )) ?? data.equities.map((e) => (
                   <EquityCard key={e.symbol} inst={e} />
                 ))}
               </div>
             </section>
 
             {/* Rates | FX | Commodities */}
-            <section className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-              <YieldCurveSection rates={data.rates} />
-              <FXTable fx={data.fx} />
-              <CommodityTable commodities={data.commodities} />
+            <section>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                <YieldCurveSection rates={data.rates} />
+                {/* FX with timeframe */}
+                <div>
+                  <div className="flex items-center justify-between mb-2 px-0.5">
+                    <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">FX Markets</span>
+                    <TimeframeBar value={fxTF} onChange={setFxTF} />
+                  </div>
+                  <FXTable fx={data.fx} timeframe={fxTF} />
+                </div>
+                {/* Commodities with timeframe */}
+                <div>
+                  <div className="flex items-center justify-between mb-2 px-0.5">
+                    <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">Commodities</span>
+                    <TimeframeBar value={commTF} onChange={setCommTF} />
+                  </div>
+                  <CommodityTable commodities={data.commodities} timeframe={commTF} />
+                </div>
+              </div>
             </section>
 
             {/* Risk */}
             <section>
               <RiskSection vol={data.volatility} />
+            </section>
+
+            {/* Options · Index Skew · Put/Call Walls · Expiration Calendar */}
+            <section>
+              <div className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-2">
+                Options Flow · Index Skew &amp; OI Walls
+              </div>
+              <OptionsSection />
             </section>
 
             {/* Technical & Cross-Asset Dynamics */}
@@ -783,7 +925,7 @@ export default function DashboardPage() {
         )}
 
         <p className="text-center text-[10px] text-slate-800 font-mono pb-4">
-          For informational purposes only · Not financial advice · Data sourced from public market feeds
+          CROSSED MATRIX · For informational purposes only · Not financial advice · Data sourced from public market feeds
         </p>
       </main>
     </div>
