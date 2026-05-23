@@ -135,7 +135,7 @@ async function fetchAllFREDFXData(): Promise<
  */
 function buildFXDataWithValidation(
   fredData: Map<string, { price: number; date: string } | null>,
-  yahooData: Map<string, { price: number; change: number; changePercent: number; timestamp: number }>
+  yahooData: Map<string, { price: number | null; change: number | null; changePercent: number | null; timestamp: number }>
 ): FXDataWithValidation[] {
   return Object.entries(FRED_FX_SERIES).map(([fredKey, config]) => {
     const fredEntry = fredData.get(fredKey)
@@ -205,11 +205,11 @@ export async function GET() {
       ),
     ])
 
-    // Convert Yahoo FX data to usable format
+    // Convert Yahoo FX data to usable format (allows null for rate-limited data)
     const yahooFormatted = new Map<string, {
-      price: number
-      change: number
-      changePercent: number
+      price: number | null
+      change: number | null
+      changePercent: number | null
       timestamp: number
     }>()
 

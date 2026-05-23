@@ -16,11 +16,11 @@ export interface YahooQuote {
 
 export interface MarketDataPoint {
   symbol: string
-  price: number
-  change: number
-  changePercent: number
+  price: number | null          // null = rate-limited or unavailable
+  change: number | null
+  changePercent: number | null
   timestamp: number
-  dataSource: 'yahoo-finance' | 'fallback'
+  dataSource: 'yahoo-finance' | 'fallback' | 'rate-limited'  // rate-limited = explicit null (not stale data)
 }
 
 export interface HistoricalCandle {
@@ -104,7 +104,14 @@ export async function fetchHistoricalChart(
       })
 
       if (!res.ok) {
-        console.warn(`[yahoo-chart] ${host} returned HTTP ${res.status} for ${symbol}`)
+        // CRITICAL: Log rate limits and auth failures explicitly
+        if (res.status === 401) {
+          console.error(`[yahoo-chart] HTTP 401 UNAUTHORIZED for ${symbol} on ${host}`)
+        } else if (res.status === 429) {
+          console.error(`[yahoo-chart] HTTP 429 RATE LIMITED for ${symbol} on ${host}`)
+        } else {
+          console.warn(`[yahoo-chart] ${host} returned HTTP ${res.status} for ${symbol}`)
+        }
         continue
       }
 
@@ -253,26 +260,25 @@ export async function fetchConsolidatedMarketQuotes(symbols: string[]): Promise<
     }
   }
 
-  // ─── Secondary: Fallback to cached market data ──────────────────────────
-  console.warn(`[yahoo-batch] Primary endpoints failed, using fallback cache for ${symbols.length} symbols`)
+  // ─── Secondary: ZERO-TOLERANCE DATA INTEGRITY ────────────────────────────
+  // Do NOT use hardcoded fallback prices for rate-limited requests
+  // Return explicit null to indicate "data unavailable" rather than stale data
+  console.error(`[yahoo-batch] RATE LIMIT/AUTH FAILURE — returning null prices for all symbols`)
+  console.error(`[yahoo-batch] Affected symbols: ${symbols.join(', ')}`)
 
+  // Return null prices to force frontend "--" rendering (honest about data state)
   for (const symbol of symbols) {
-    if (symbol in FALLBACK_QUOTES) {
-      const fallback = FALLBACK_QUOTES[symbol]
-      results.set(symbol, {
-        ...fallback,
-        timestamp: Date.now(),
-        dataSource: 'fallback',
-      })
-    }
+    results.set(symbol, {
+      symbol,
+      price: null as any, // null indicates rate-limited/unavailable
+      change: null as any,
+      changePercent: null as any,
+      timestamp: Date.now(),
+      dataSource: 'rate-limited', // explicit marker for rate limit condition
+    })
   }
 
-  if (results.size > 0) {
-    console.info(`[yahoo-batch] Serving ${results.size} symbols from fallback (market may be closed)`)
-    return results
-  }
-
-  console.error('[yahoo-batch] Unable to fetch any market data — returning empty results')
+  console.info(`[yahoo-batch] Returning ${results.size} null-price entries (rate-limited)`)
   return results
 }
 

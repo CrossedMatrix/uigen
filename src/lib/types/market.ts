@@ -47,9 +47,9 @@ export interface MarketNode {
   sources: DataSource[]       // Primary, secondary, fallback sources
 
   // Current State
-  price: number              // Live price
-  change: number             // Absolute change
-  changePercent: number      // Percentage change
+  price: number | null       // Live price (null = rate-limited/unavailable, renders as "--")
+  change: number | null      // Absolute change
+  changePercent: number | null // Percentage change
   timestamp: number          // Unix ms of last update
 
   // Optional Fields

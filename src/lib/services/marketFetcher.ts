@@ -138,12 +138,13 @@ function getLivenessMessage(
 
 /**
  * Build a MarketNode from raw data and liveness calculation
+ * ZERO-TOLERANCE: Accepts null prices to render "--" for rate-limited data
  */
 export function buildMarketNode(
   marketId: string,
-  price: number,
-  change: number,
-  changePercent: number,
+  price: number | null,
+  change: number | null,
+  changePercent: number | null,
   timestamp: number,
   context: LivenessContext,
   feedHealthPercent: number,
@@ -225,15 +226,21 @@ interface RawQuote {
  * Calculate current and historical prices from candle array
  * Handles timeframe-aware indexing and weekend fallback
  * All prices derive from real market data (candles), never from static fallbacks
+ * ZERO-TOLERANCE: Returns null if data unavailable (rate-limited)
  */
 function calculatePriceMetrics(
   yahooSymbol: string,
   candles: HistoricalCandle[],
   timeframe: '1D' | '5D' | '1M' | '3M',
   liveQuote?: RawQuote
-): { currentPrice: number; historicalPrice: number; isWeekendFallback: boolean } {
+): { currentPrice: number | null; historicalPrice: number | null; isWeekendFallback: boolean } {
+  // CRITICAL: If no candles AND no live quote, return null (data unavailable)
+  if (candles.length === 0 && !liveQuote) {
+    return { currentPrice: null, historicalPrice: null, isWeekendFallback: false }
+  }
+
   // Prefer live quote price, fall back to latest candle close for weekends
-  const currentPrice = liveQuote ? liveQuote.regularMarketPrice : (candles[0]?.close ?? 0)
+  const currentPrice = liveQuote ? liveQuote.regularMarketPrice : (candles[0]?.close ?? null)
   const isWeekendFallback = !liveQuote || (liveQuote.regularMarketChangePercent === 0 && candles.length > 0)
 
   // Timeframe-aware historical index offsets
@@ -293,21 +300,26 @@ export async function fetchMarketData(
 
     // Convert MarketDataPoint to RawQuote format (ONLY for live yahoo-finance data, NOT fallback)
     result.forEach((point, symbol) => {
-      // CRITICAL: Only include live Yahoo Finance quotes, reject fallback prices
-      // Fallback prices corrupt dashboard (old prices like $3291 for Gold, $61 for WTI)
-      // Instead use candles array for all price calculations
-      if (point.dataSource === 'yahoo-finance') {
+      // CRITICAL: Only include live Yahoo Finance quotes, reject fallback & rate-limited prices
+      // - Fallback prices corrupt dashboard (old prices like $3291 for Gold, $61 for WTI)
+      // - Rate-limited (null prices) are explicit "data unavailable" markers
+      // For both: use candles array for calculation, or null if candles unavailable
+      if (point.dataSource === 'yahoo-finance' && point.price !== null) {
         yahooData.set(symbol, {
           symbol,
           regularMarketPrice: point.price,
-          regularMarketChange: point.change,
-          regularMarketChangePercent: point.changePercent,
+          regularMarketChange: point.change ?? 0,
+          regularMarketChangePercent: point.changePercent ?? 0,
           regularMarketTime: Math.floor(point.timestamp / 1000),
         })
-      } else {
-        // Fallback data: don't add to yahooData, force use of candles array
+      } else if (point.dataSource === 'rate-limited') {
+        // ZERO-TOLERANCE: Rate-limited means we explicitly return null (not stale data)
+        console.error(`[marketFetcher] RATE LIMITED: ${symbol} — will use candles or render "--"`)
         usingFallback = true
-        console.debug(`[marketFetcher] Skipping fallback price for ${symbol}, will use candles instead`)
+      } else {
+        // Other fallback data: don't add to yahooData, force use of candles array
+        usingFallback = true
+        console.debug(`[marketFetcher] Skipping ${point.dataSource} price for ${symbol}, will use candles instead`)
       }
     })
 
@@ -403,6 +415,27 @@ export async function fetchMarketData(
         timeframe,
         quote
       )
+
+      // ZERO-TOLERANCE: If either price is null (rate-limited), propagate null to node
+      if (currentPrice === null || historicalPrice === null) {
+        const node = buildMarketNode(
+          marketId,
+          null as any, // null price forces "--" render on frontend
+          null as any,
+          null as any,
+          nowMs,
+          { ...livenessContext, marketOpenState: { isOpen: false, nextOpenMs: 0, nextCloseMs: 0 } },
+          0, // 0% health for rate-limited data
+          'fallback'
+        )
+
+        if (node) {
+          nodes[marketId] = node
+          disconnectedCount++
+          console.error(`[marketFetcher] RATE LIMITED: ${yahooSymbol} → returning null prices`)
+        }
+        continue // Skip normal processing for this symbol
+      }
 
       const displayChange = currentPrice - historicalPrice
       const displayChangePercent =

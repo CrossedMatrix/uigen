@@ -51,16 +51,20 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
     : ''
 
   // ─── Format Values ───────────────────────────────────────────────────────────
+  // ZERO-TOLERANCE: Handle null prices (rate-limited) with clean "--" display
 
-  const priceDisplay = price.toFixed(decimals)
-  const changeColor = change >= 0 ? '#34d399' : '#f87171'
-  const changeDisplay = (change >= 0 ? '+' : '') + change.toFixed(decimals)
-  const changePctDisplay = (changePercent >= 0 ? '+' : '') + changePercent.toFixed(2) + '%'
+  const priceDisplay = price === null ? '--' : price.toFixed(decimals ?? 2)
+  const changeColor = change === null || change >= 0 ? '#34d399' : '#f87171'
+  const changeDisplay =
+    change === null ? '--' : (change >= 0 ? '+' : '') + change.toFixed(decimals ?? 2)
+  const changePctDisplay =
+    changePercent === null ? '--' : (changePercent >= 0 ? '+' : '') + changePercent.toFixed(2) + '%'
 
   // ─── Sparkline Rendering ─────────────────────────────────────────────────────
 
   const renderSparkline = () => {
-    if (!showSparkline || !sparkline || sparkline.length < 2) return null
+    // ZERO-TOLERANCE: Don't render sparkline for null prices
+    if (!showSparkline || !sparkline || sparkline.length < 2 || price === null) return null
 
     const minPrice = Math.min(...sparkline)
     const maxPrice = Math.max(...sparkline)
@@ -119,15 +123,23 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
         {/* Name & Price */}
         <div className="flex-1">
           <div className="font-mono font-semibold text-slate-100">{displayName}</div>
-          <div className="text-slate-400">{priceDisplay} {unit}</div>
+          <div className={price === null ? 'text-slate-500/60 font-mono' : 'text-slate-400'}>
+            {priceDisplay} {unit}
+          </div>
         </div>
 
         {/* Change - Shifted right */}
         <div className="text-right">
-          <div className="font-mono font-semibold" style={{ color: changeColor }}>
+          <div
+            className="font-mono font-semibold"
+            style={{ color: changePercent === null ? 'rgb(100, 116, 139, 0.6)' : changeColor }}
+          >
             {changeDisplay}
           </div>
-          <div className="text-[10px]" style={{ color: changeColor }}>
+          <div
+            className="text-[10px]"
+            style={{ color: changePercent === null ? 'rgb(100, 116, 139, 0.6)' : changeColor }}
+          >
             {changePctDisplay}
           </div>
         </div>
@@ -155,21 +167,38 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
 
       {/* ─── PRICE & UNIT ────────────────────────────────────────────────────────────── */}
       <div className="text-right">
-        <div className="font-mono text-sm font-semibold text-slate-100">
+        <div
+          className={`font-mono text-sm font-semibold ${
+            price === null ? 'text-slate-500/60' : 'text-slate-100'
+          }`}
+        >
           {priceDisplay}
         </div>
-        <div className="text-[9px] text-slate-400 font-mono">{unit}</div>
+        <div
+          className={`text-[9px] font-mono ${price === null ? 'text-slate-500/60' : 'text-slate-400'}`}
+        >
+          {unit}
+        </div>
       </div>
 
       {/* ─── CHANGE ──────────────────────────────────────────────────────────────────── */}
       <div className="text-right">
         <div
           className="font-mono text-sm font-bold tabular-nums"
-          style={{ color: changeColor }}
+          style={{
+            color:
+              changePercent === null ? 'rgb(100, 116, 139, 0.6)' : changeColor,
+          }}
         >
           {changeDisplay}
         </div>
-        <div className="text-[10px] font-mono" style={{ color: changeColor }}>
+        <div
+          className="text-[10px] font-mono"
+          style={{
+            color:
+              changePercent === null ? 'rgb(100, 116, 139, 0.6)' : changeColor,
+          }}
+        >
           {changePctDisplay}
         </div>
         {showSparkline && renderSparkline()}
