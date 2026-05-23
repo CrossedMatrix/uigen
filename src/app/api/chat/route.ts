@@ -1,6 +1,6 @@
 import type { FileNode } from "@/lib/file-system";
 import { VirtualFileSystem } from "@/lib/file-system";
-import { streamText, appendResponseMessages } from "ai";
+import { streamText } from "ai";
 import { buildStrReplaceTool } from "@/lib/tools/str-replace";
 import { buildFileManagerTool } from "@/lib/tools/file-manager";
 import { prisma } from "@/lib/prisma";
@@ -28,7 +28,7 @@ export async function POST(req: Request) {
   const fileSystem = new VirtualFileSystem();
   fileSystem.deserializeFromNodes(files);
 
-  const model = getLanguageModel();
+  const model = getLanguageModel() as any;
   // Use fewer steps for mock provider to prevent repetition
   const isMockProvider = !process.env.ANTHROPIC_API_KEY;
   const result = streamText({
@@ -42,8 +42,8 @@ export async function POST(req: Request) {
     tools: {
       str_replace_editor: buildStrReplaceTool(fileSystem),
       file_manager: buildFileManagerTool(fileSystem),
-    },
-    onFinish: async ({ response }) => {
+    } as any,
+    onFinish: async ({ response }: any) => {
       // Save to project if projectId is provided and user is authenticated
       if (projectId) {
         try {
@@ -57,10 +57,10 @@ export async function POST(req: Request) {
           // Get the messages from the response
           const responseMessages = response.messages || [];
           // Combine original messages with response messages
-          const allMessages = appendResponseMessages({
-            messages: [...messages.filter((m) => m.role !== "system")],
-            responseMessages,
-          });
+          const allMessages = [
+            ...messages.filter((m) => m.role !== "system"),
+            ...responseMessages,
+          ];
 
           await prisma.project.update({
             where: {
@@ -77,9 +77,9 @@ export async function POST(req: Request) {
         }
       }
     },
-  });
+  } as any);
 
-  return result.toDataStreamResponse();
+  return result.toTextStreamResponse();
 }
 
 export const maxDuration = 120;

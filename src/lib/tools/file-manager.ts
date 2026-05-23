@@ -3,7 +3,8 @@ import { z } from "zod";
 import { VirtualFileSystem } from "../file-system";
 
 export function buildFileManagerTool(fileSystem: VirtualFileSystem) {
-  return tool({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (tool as any)({
     description:
       'Rename or delete files or folders in the file system. Rename can be used to "move" a file. Rename will recursively create folders as required.',
     parameters: z.object({
@@ -18,7 +19,7 @@ export function buildFileManagerTool(fileSystem: VirtualFileSystem) {
         .optional()
         .describe("The new path. Only provide when renaming or moving a file."),
     }),
-    execute: async ({ command, path, new_path }) => {
+    execute: async ({ command, path, new_path }: { command: string; path: string; new_path?: string }) => {
       if (command === "rename") {
         if (!new_path) {
           return {
@@ -49,5 +50,5 @@ export function buildFileManagerTool(fileSystem: VirtualFileSystem) {
 
       return { success: false, error: "Invalid command" };
     },
-  });
+  }) as any;
 }

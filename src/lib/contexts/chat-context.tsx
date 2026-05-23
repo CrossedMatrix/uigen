@@ -3,21 +3,22 @@
 import {
   createContext,
   useContext,
+  useState,
   ReactNode,
   useEffect,
 } from "react";
 import { useChat as useAIChat } from "@ai-sdk/react";
-import { Message } from "ai";
+import { UIMessage } from "ai";
 import { useFileSystem } from "./file-system-context";
 import { setHasAnonWork } from "@/lib/anon-work-tracker";
 
 interface ChatContextProps {
   projectId?: string;
-  initialMessages?: Message[];
+  initialMessages?: UIMessage[];
 }
 
 interface ChatContextType {
-  messages: Message[];
+  messages: UIMessage[];
   input: string;
   handleInputChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   handleSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
@@ -33,11 +34,13 @@ export function ChatProvider({
 }: ChatContextProps & { children: ReactNode }) {
   const { fileSystem, handleToolCall } = useFileSystem();
 
+  // The new @ai-sdk/react drops input/handleInputChange/handleSubmit from useChat.
+  // We manage input state ourselves and call sendMessage directly.
+  const [input, setInput] = useState("");
+
   const {
     messages,
-    input,
-    handleInputChange,
-    handleSubmit,
+    sendMessage,
     status,
   } = useAIChat({
     api: "/api/chat",
@@ -46,10 +49,22 @@ export function ChatProvider({
       files: fileSystem.serialize(),
       projectId,
     },
-    onToolCall: ({ toolCall }) => {
+    onToolCall: ({ toolCall }: { toolCall: any }) => {
       handleToolCall(toolCall);
     },
-  });
+  } as any);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+  };
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    sendMessage({ role: "user", content: trimmed } as any);
+    setInput("");
+  };
 
   // Track anonymous work
   useEffect(() => {

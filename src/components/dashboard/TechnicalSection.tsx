@@ -70,14 +70,14 @@ export const TECHNICALS_MOCK: TechnicalRow[] = [
   {
     symbol: 'GC=F',
     shortName: 'GOLD',
-    price: 3215.40,
-    support2: 3000,
-    support1: 3100,
-    resistance1: 3280,
-    resistance2: 3500,
-    ma50: 3050,
-    ma200: 2680,
-    rsi14: 72.1,  // overbought → red badge
+    price: 3328.40,
+    support2: 3100,
+    support1: 3200,
+    resistance1: 3400,
+    resistance2: 3600,
+    ma50: 3150,
+    ma200: 2850,
+    rsi14: 68.4,
   },
   {
     symbol: 'SI=F',
@@ -118,14 +118,14 @@ export const TECHNICALS_MOCK: TechnicalRow[] = [
   {
     symbol: 'CL=F',
     shortName: 'CRUDE',
-    price: 78.24,
-    support2: 68.00,
-    support1: 74.50,
-    resistance1: 82.00,
-    resistance2: 88.00,
-    ma50: 76.40,
-    ma200: 79.80,   // MA50 < MA200 → Death Cross
-    rsi14: 48.2,
+    price: 61.84,
+    support2: 55.00,
+    support1: 58.00,
+    resistance1: 65.00,
+    resistance2: 70.00,
+    ma50: 63.20,
+    ma200: 71.40,   // MA50 < MA200 → Death Cross
+    rsi14: 41.8,
   },
   {
     symbol: 'SOXX',
@@ -254,10 +254,10 @@ function isNear(price: number, level: number, threshold = 0.01): boolean {
 }
 
 const SIG = {
-  bullish: { text: 'text-emerald-400', bg: 'bg-emerald-400/10', border: 'border-emerald-400/30' },
-  bearish: { text: 'text-red-400',     bg: 'bg-red-400/10',     border: 'border-red-400/30'     },
+  bullish: { text: 'text-[#4db8a8]', bg: 'bg-emerald-400/10', border: 'border-emerald-400/30' },
+  bearish: { text: 'text-[#b87070]',     bg: 'bg-red-400/10',     border: 'border-red-400/30'     },
   warning: { text: 'text-amber-400',   bg: 'bg-amber-400/10',   border: 'border-amber-400/30'   },
-  neutral: { text: 'text-slate-400',   bg: 'bg-slate-700/30',   border: 'border-slate-700/40'   },
+  neutral: { text: 'text-slate-400',   bg: 'bg-slate-700/30',   border: 'border-slate-500/40'   },
 } as const
 
 // ─── Mini Sparkline ───────────────────────────────────────────────────────────
@@ -392,7 +392,7 @@ function LevelCell({
           ? 'text-amber-300 border-amber-400/50 bg-amber-400/10 animate-pulse'
           : near && type === 'support'
           ? 'text-cyan-300 border-cyan-400/50 bg-cyan-400/10 animate-pulse'
-          : 'text-slate-600 border-transparent',
+          : 'text-slate-300 border-transparent',
       )}
     >
       {fmtLevel(level)}
@@ -410,7 +410,7 @@ function CrossBadge({ ma50, ma200 }: { ma50: number; ma200: number }) {
         'inline-flex items-center gap-1 text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border whitespace-nowrap',
         golden
           ? 'text-amber-300 bg-amber-400/10 border-amber-400/25'
-          : 'text-red-400 bg-red-400/10 border-red-400/25',
+          : 'text-[#b87070] bg-red-400/10 border-red-400/25',
       )}
     >
       <span style={{ fontSize: '11px' }}>{golden ? '⊕' : '⊗'}</span>
@@ -428,14 +428,14 @@ function RSIBadge({ rsi }: { rsi: number }) {
     <div
       className={cn(
         'font-mono text-xs tabular-nums px-1.5 py-0.5 rounded border inline-flex items-center gap-1',
-        ob ? 'text-red-400 bg-red-400/10 border-red-400/25' :
-        os ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/25' :
+        ob ? 'text-[#b87070] bg-red-400/10 border-red-400/25' :
+        os ? 'text-[#4db8a8] bg-emerald-400/10 border-emerald-400/25' :
         'text-slate-400 border-transparent',
       )}
     >
       {rsi.toFixed(1)}
-      {ob && <span className="text-[9px] opacity-60">OB</span>}
-      {os && <span className="text-[9px] opacity-60">OS</span>}
+      {ob && <span className="text-[12px] opacity-60">OB</span>}
+      {os && <span className="text-[12px] opacity-60">OS</span>}
     </div>
   )
 }
@@ -511,15 +511,15 @@ function MARow({ row }: { row: TechnicalRow }) {
       style={{ gridTemplateColumns: COL_TEMPLATE }}
     >
       <div />
-      <div className="text-[10px] text-slate-700 font-mono text-right">MA details</div>
+      <div className="text-[10px] text-slate-400 font-mono text-right">MA details</div>
       <div className="col-span-2 text-right">
-        <span className="text-[10px] text-slate-700 font-mono">
+        <span className="text-[10px] text-slate-400 font-mono">
           50d: <span className="text-slate-500">{fmtLevel(row.ma50)}</span>
         </span>
       </div>
       <div />
       <div className="col-span-2 text-right">
-        <span className="text-[10px] text-slate-700 font-mono">
+        <span className="text-[10px] text-slate-400 font-mono">
           200d: <span className="text-slate-500">{fmtLevel(row.ma200)}</span>
         </span>
       </div>
@@ -556,7 +556,7 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
         <div className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest mb-0.5">
           {ratio.name}
         </div>
-        <div className="text-[11px] text-slate-600">{ratio.subtitle}</div>
+        <div className="text-[11px] text-slate-300">{ratio.subtitle}</div>
       </div>
 
       {/* Value row */}
@@ -570,7 +570,7 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
               >
                 {regimeLabel}
               </div>
-              <div className="font-mono text-[11px] text-slate-600 mt-1">
+              <div className="font-mono text-[11px] text-slate-300 mt-1">
                 Score {ratio.value.toFixed(0)}/100
               </div>
             </>
@@ -582,7 +582,7 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
           <div
             className={cn(
               'font-mono text-[11px] mt-1',
-              ratio.change >= 0 ? 'text-emerald-400' : 'text-red-400',
+              ratio.change >= 0 ? 'text-[#4db8a8]' : 'text-[#b87070]',
             )}
           >
             {ratio.change >= 0 ? '+' : ''}{ratio.change.toFixed(2)}%
@@ -621,9 +621,26 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
       </div>
 
       {/* Note */}
-      <p className="text-[10px] text-slate-700 leading-snug border-t border-[#1a2540] pt-2">
+      <p className="text-[10px] text-slate-400 leading-snug border-t border-[#1a2540] pt-2">
         {ratio.note}
       </p>
+    </div>
+  )
+}
+
+// ─── Ratios Panel (exportable) ────────────────────────────────────────────────
+
+export function RatiosPanel({ ratios = RATIOS_MOCK }: { ratios?: RatioCard[] }) {
+  return (
+    <div>
+      <div className="text-[10px] font-mono text-slate-300 uppercase tracking-widest mb-2">
+        Cross-Asset Ratios · Macro Dynamics
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {ratios.map((ratio) => (
+          <RatioCardComponent key={ratio.id} ratio={ratio} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -632,14 +649,12 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
 
 export interface TechnicalSectionProps {
   technicals?: TechnicalRow[]
-  ratios?: RatioCard[]
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function TechnicalSection({
   technicals = TECHNICALS_MOCK,
-  ratios = RATIOS_MOCK,
 }: TechnicalSectionProps) {
   return (
     <section className="space-y-4">
@@ -650,7 +665,7 @@ export function TechnicalSection({
           <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">
             Individual Asset Technicals
           </h3>
-          <div className="flex items-center gap-4 text-[10px] text-slate-700 font-mono">
+          <div className="flex items-center gap-4 text-[10px] text-slate-400 font-mono">
             <span className="flex items-center gap-1.5">
               <span className="inline-block w-3 h-px bg-cyan-600/70" />
               S1/S2 Support
@@ -685,7 +700,7 @@ export function TechnicalSection({
                 ['Cross',     'text-left'],
                 ['RSI 14',    'text-right'],
               ].map(([label, align]) => (
-                <div key={label} className={cn('text-[9px] font-mono text-slate-700 uppercase tracking-widest', align)}>
+                <div key={label} className={cn('text-[12px] font-mono text-slate-400 uppercase tracking-widest', align)}>
                   {label}
                 </div>
               ))}
@@ -701,41 +716,30 @@ export function TechnicalSection({
         </div>
 
         {/* Legend */}
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-4 pt-3 border-t border-[#1a2540] text-[10px] font-mono text-slate-700">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-4 pt-3 border-t border-[#1a2540] text-[10px] font-mono text-slate-400">
           <span className="flex items-center gap-1.5">
-            <span className="text-amber-300 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded text-[9px] font-bold">
+            <span className="text-amber-300 bg-amber-400/10 border border-amber-400/20 px-1.5 py-0.5 rounded text-[12px] font-bold">
               ⊕ GC
             </span>
             Golden Cross — MA50 &gt; MA200 (bullish)
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="text-red-400 bg-red-400/10 border border-red-400/20 px-1.5 py-0.5 rounded text-[9px] font-bold">
+            <span className="text-[#b87070] bg-red-400/10 border border-red-400/20 px-1.5 py-0.5 rounded text-[12px] font-bold">
               ⊗ DC
             </span>
             Death Cross — MA50 &lt; MA200 (bearish)
           </span>
           <span className="ml-auto flex items-center gap-3">
             <span>
-              <span className="text-red-400">RSI &gt; 70</span> = Overbought
+              <span className="text-[#b87070]">RSI &gt; 70</span> = Overbought
             </span>
             <span>
-              <span className="text-emerald-400">RSI &lt; 30</span> = Oversold
+              <span className="text-[#4db8a8]">RSI &lt; 30</span> = Oversold
             </span>
           </span>
         </div>
       </div>
 
-      {/* ── Cross-Asset Ratios ───────────────────────────────────────────── */}
-      <div>
-        <div className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-2">
-          Cross-Asset Ratios · Macro Dynamics
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {ratios.map((ratio) => (
-            <RatioCardComponent key={ratio.id} ratio={ratio} />
-          ))}
-        </div>
-      </div>
     </section>
   )
 }

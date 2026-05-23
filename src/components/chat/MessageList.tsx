@@ -1,12 +1,12 @@
 "use client";
 
-import { Message } from "ai";
+import { UIMessage } from "ai";
 import { cn } from "@/lib/utils";
 import { User, Bot, Loader2 } from "lucide-react";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 interface MessageListProps {
-  messages: Message[];
+  messages: UIMessage[];
   isLoading?: boolean;
 }
 
@@ -26,9 +26,9 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
   return (
     <div className="flex flex-col h-full overflow-y-auto px-4 py-6">
       <div className="space-y-6 max-w-4xl mx-auto w-full">
-        {messages.map((message) => (
+        {messages.map((message, index) => (
           <div
-            key={message.id || message.content}
+            key={message.id || `${message.role}-${index}`}
             className={cn(
               "flex gap-4",
               message.role === "user" ? "justify-end" : "justify-start"
@@ -71,11 +71,11 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
                             return (
                               <div key={partIndex} className="mt-3 p-3 bg-white/50 rounded-md border border-neutral-200">
                                 <span className="text-xs font-medium text-neutral-600 block mb-1">Reasoning</span>
-                                <span className="text-sm text-neutral-700">{part.reasoning}</span>
+                                <span className="text-sm text-neutral-700">{(part as any).reasoning}</span>
                               </div>
                             );
                           case "tool-invocation":
-                            const tool = part.toolInvocation;
+                            const tool = (part as any).toolInvocation;
                             return (
                               <div key={partIndex} className="inline-flex items-center gap-2 mt-2 px-3 py-1.5 bg-neutral-50 rounded-lg text-xs font-mono border border-neutral-200">
                                 {tool.state === "result" && tool.result ? (
@@ -91,10 +91,11 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
                                 )}
                               </div>
                             );
-                          case "source":
+                          case "source-document":
+                          case "source-url":
                             return (
                               <div key={partIndex} className="mt-2 text-xs text-neutral-500">
-                                Source: {JSON.stringify(part.source)}
+                                Source: {JSON.stringify((part as any).source || (part as any).url)}
                               </div>
                             );
                           case "step-start":
@@ -112,11 +113,11 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
                           </div>
                         )}
                     </>
-                  ) : message.content ? (
+                  ) : (message as any).content ? (
                     message.role === "user" ? (
-                      <span className="whitespace-pre-wrap">{message.content}</span>
+                      <span className="whitespace-pre-wrap">{(message as any).content}</span>
                     ) : (
-                      <MarkdownRenderer content={message.content} className="prose-sm" />
+                      <MarkdownRenderer content={(message as any).content} className="prose-sm" />
                     )
                   ) : isLoading &&
                     message.role === "assistant" &&

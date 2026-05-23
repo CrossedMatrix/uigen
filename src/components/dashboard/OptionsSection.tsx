@@ -23,10 +23,10 @@ export interface IndexSkewData {
   shortName: string
   currentPrice: number
   atmIV: number
-  ivRank: number        // 0–100 percentile vs 1-year range
-  skewSlope: number     // put25 – call25 IV in vols
-  impMove1W: number     // ±% implied move nearest weekly
-  impMove1M: number     // ±% implied move nearest monthly
+  ivRank: number
+  skewSlope: number
+  impMove1W: number
+  impMove1M: number
   curve: SkewPoint[]
   callWall: number
   putWall: number
@@ -36,7 +36,7 @@ export interface IndexSkewData {
 
 export interface OIBar {
   strike: number
-  callOI: number   // thousands of contracts
+  callOI: number
   putOI: number
 }
 
@@ -47,7 +47,6 @@ function cn(...classes: (string | undefined | false | null)[]) {
 }
 
 function fmtStrike(n: number): string {
-  if (n >= 10000) return n.toLocaleString('en-US', { maximumFractionDigits: 0 })
   return n.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 
@@ -60,49 +59,24 @@ function getExpirations(): ExpirationEvent[] {
   const dow = now.getUTCDay()
 
   if (dow >= 1 && dow <= 5) {
-    events.push({
-      id: 'zerodte',
-      label: '0DTE',
-      date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      daysAway: 0,
-      type: 'zerodte',
-    })
+    events.push({ id: 'zerodte', label: '0DTE', date: now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), daysAway: 0, type: 'zerodte' })
   }
 
   function thirdFriday(y: number, m: number): Date {
-    const d = new Date(Date.UTC(y, m, 1))
-    let n = 0
-    while (n < 3) {
-      if (d.getUTCDay() === 5) n++
-      if (n < 3) d.setUTCDate(d.getUTCDate() + 1)
-    }
+    const d = new Date(Date.UTC(y, m, 1)); let n = 0
+    while (n < 3) { if (d.getUTCDay() === 5) n++; if (n < 3) d.setUTCDate(d.getUTCDate() + 1) }
     return d
   }
 
   const dF = ((5 - dow + 7) % 7) || 7
   const wFri = new Date(now.getTime() + dF * dayMs)
-  events.push({
-    id: 'weekly',
-    label: 'Weekly OPEX',
-    date: wFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    daysAway: dF,
-    type: 'weekly',
-  })
+  events.push({ id: 'weekly', label: 'Weekly OPEX', date: wFri.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), daysAway: dF, type: 'weekly' })
 
-  const thisOpex = thirdFriday(now.getUTCFullYear(), now.getUTCMonth())
-  const mTarget = thisOpex > now
-    ? thisOpex
+  const mTarget = thirdFriday(now.getUTCFullYear(), now.getUTCMonth()) > now
+    ? thirdFriday(now.getUTCFullYear(), now.getUTCMonth())
     : thirdFriday(now.getUTCFullYear(), now.getUTCMonth() + 1)
   const dM = Math.round((mTarget.getTime() - now.getTime()) / dayMs)
-  if (dM > dF) {
-    events.push({
-      id: 'monthly',
-      label: 'Monthly OPEX',
-      date: mTarget.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      daysAway: dM,
-      type: 'monthly',
-    })
-  }
+  if (dM > dF) events.push({ id: 'monthly', label: 'Monthly OPEX', date: mTarget.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), daysAway: dM, type: 'monthly' })
 
   let qDate: Date | null = null
   for (const m of [2, 5, 8, 11]) {
@@ -112,24 +86,15 @@ function getExpirations(): ExpirationEvent[] {
   }
   if (qDate) {
     const dQ = Math.round((qDate.getTime() - now.getTime()) / dayMs)
-    if (dQ !== dM) {
-      events.push({
-        id: 'quarterly',
-        label: 'Quarterly OPEX',
-        date: qDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        daysAway: dQ,
-        type: 'quarterly',
-      })
-    }
+    if (dQ !== dM) events.push({ id: 'quarterly', label: 'Quarterly OPEX', date: qDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), daysAway: dQ, type: 'quarterly' })
   }
 
   return events.sort((a, b) => a.daysAway - b.daysAway)
 }
 
-function ExpirationCalendar() {
+export function ExpirationCalendarBanner() {
   const events = getExpirations()
-
-  const chipStyle = (e: ExpirationEvent): { border: string; bg: string; text: string; glow?: string; pulse: boolean } => {
+  const chipStyle = (e: ExpirationEvent) => {
     if (e.type === 'zerodte') return { border: '#fbbf24', bg: 'rgba(251,191,36,0.12)', text: '#fbbf24', glow: '0 0 12px rgba(251,191,36,0.4)', pulse: true }
     if (e.type === 'weekly' && e.daysAway <= 2) return { border: '#f97316', bg: 'rgba(249,115,22,0.12)', text: '#f97316', glow: '0 0 10px rgba(249,115,22,0.3)', pulse: true }
     if (e.type === 'weekly') return { border: 'rgba(249,115,22,0.4)', bg: 'rgba(249,115,22,0.07)', text: '#f97316', pulse: false }
@@ -137,48 +102,23 @@ function ExpirationCalendar() {
     if (e.type === 'monthly') return { border: 'rgba(56,189,248,0.3)', bg: 'rgba(56,189,248,0.07)', text: '#38bdf8', pulse: false }
     return { border: 'rgba(167,139,250,0.35)', bg: 'rgba(167,139,250,0.08)', text: '#a78bfa', pulse: false }
   }
-
-  const icon = (type: ExpirationEvent['type']) => {
-    if (type === 'zerodte') return '⚡'
-    if (type === 'weekly') return '📅'
-    if (type === 'monthly') return '🗓'
-    return '🔷'
-  }
+  const icon = (t: ExpirationEvent['type']) => t === 'zerodte' ? '⚡' : t === 'weekly' ? '📅' : t === 'monthly' ? '🗓' : '🔷'
 
   return (
-    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl px-4 py-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="text-[10px] font-mono text-amber-400/70 uppercase tracking-widest shrink-0 mr-1">
-          Expiration Calendar
-        </span>
-        {events.map((e) => {
-          const s = chipStyle(e)
-          return (
-            <div
-              key={e.id}
-              className={cn('inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[11px] font-mono', e.type === 'zerodte' || s.pulse ? 'animate-pulse' : '')}
-              style={{
-                borderColor: s.border,
-                backgroundColor: s.bg,
-                color: s.text,
-                boxShadow: s.glow,
-              }}
-            >
-              <span>{icon(e.type)}</span>
-              <span className="font-bold">{e.label}</span>
-              <span className="opacity-70">—</span>
-              <span>{e.date}</span>
-              {e.daysAway === 0
-                ? <span className="opacity-60 text-[9px]">TODAY</span>
-                : <span className="opacity-60 text-[9px]">{e.daysAway}d</span>
-              }
-            </div>
-          )
-        })}
-        <span className="ml-auto text-[9px] font-mono text-slate-700 hidden lg:block">
-          SPX, NDX, RUT standard expirations · 0DTE = daily S&amp;P options
-        </span>
-      </div>
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-xl px-4 py-2.5 flex flex-wrap items-center gap-2.5">
+      <span className="text-[10px] font-mono text-amber-400/70 uppercase tracking-widest shrink-0">Exp. Calendar</span>
+      {events.map((e) => {
+        const s = chipStyle(e)
+        return (
+          <div key={e.id} className={cn('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono', s.pulse ? 'animate-pulse' : '')}
+            style={{ borderColor: s.border, backgroundColor: s.bg, color: s.text, boxShadow: (s as { glow?: string }).glow }}>
+            <span>{icon(e.type)}</span>
+            <span className="font-bold">{e.label}</span>
+            <span className="opacity-60">{e.date}</span>
+            <span className="opacity-50 text-[12px]">{e.daysAway === 0 ? 'TODAY' : `${e.daysAway}d`}</span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -188,25 +128,16 @@ function ExpirationCalendar() {
 function SkewCurveSVG({ curve }: { curve: SkewPoint[] }) {
   const uid = useId()
   const gid = `skc${uid.replace(/:/g, '')}`
-  const W = 160
-  const H = 52
-  const pad = 6
-
+  const W = 160, H = 52, pad = 6
   const ivs = curve.map((p) => p.iv)
-  const minIV = Math.min(...ivs)
-  const maxIV = Math.max(...ivs)
-  const rng = maxIV - minIV || 1
-
+  const minIV = Math.min(...ivs), maxIV = Math.max(...ivs), rng = maxIV - minIV || 1
   const pts = curve.map((p, i) => ({
     x: pad + (i / (curve.length - 1)) * (W - pad * 2),
     y: H - pad - ((p.iv - minIV) / rng) * (H - pad * 2),
-    label: p.label,
-    iv: p.iv,
+    label: p.label, iv: p.iv,
   }))
-
   const atmIdx = curve.findIndex((p) => p.label === 'ATM')
   const atmPt = pts[atmIdx]
-
   const line = pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
 
   return (
@@ -218,47 +149,14 @@ function SkewCurveSVG({ curve }: { curve: SkewPoint[] }) {
             <stop offset="100%" stopColor="#fbbf24" stopOpacity="0" />
           </linearGradient>
         </defs>
-        {/* Fill under curve */}
-        <path
-          d={`M${pts[0].x},${H} ${pts.map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} L${pts[pts.length - 1].x},${H} Z`}
-          fill={`url(#${gid})`}
-        />
-        {/* ATM vertical dashed line */}
-        {atmPt && (
-          <line
-            x1={atmPt.x} y1={pad / 2}
-            x2={atmPt.x} y2={H}
-            stroke="rgba(148,163,184,0.25)" strokeWidth="1" strokeDasharray="2,2"
-          />
-        )}
-        {/* Smile curve */}
-        <polyline
-          points={line}
-          fill="none"
-          stroke="#fbbf24"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        {/* IV dots */}
-        {pts.map((p) => (
-          <circle
-            key={p.label}
-            cx={p.x} cy={p.y} r={p.label === 'ATM' ? 3 : 2}
-            fill={p.label === 'ATM' ? '#fbbf24' : 'rgba(251,191,36,0.5)'}
-          />
-        ))}
+        <path d={`M${pts[0].x},${H} ${pts.map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} L${pts[pts.length-1].x},${H} Z`} fill={`url(#${gid})`} />
+        {atmPt && <line x1={atmPt.x} y1={pad/2} x2={atmPt.x} y2={H} stroke="rgba(148,163,184,0.2)" strokeWidth="1" strokeDasharray="2,2" />}
+        <polyline points={line} fill="none" stroke="#fbbf24" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        {pts.map((p) => <circle key={p.label} cx={p.x} cy={p.y} r={p.label === 'ATM' ? 3 : 2} fill={p.label === 'ATM' ? '#fbbf24' : 'rgba(251,191,36,0.5)'} />)}
       </svg>
-      {/* X-axis labels */}
       <div className="flex justify-between px-1.5 mt-0.5">
         {curve.map((p) => (
-          <span
-            key={p.label}
-            className="text-[9px] font-mono"
-            style={{ color: p.label === 'ATM' ? '#fbbf24' : 'rgba(100,116,139,0.8)' }}
-          >
-            {p.label}
-          </span>
+          <span key={p.label} className="text-[12px] font-mono" style={{ color: p.label === 'ATM' ? '#fbbf24' : 'rgba(100,116,139,0.8)' }}>{p.label}</span>
         ))}
       </div>
     </div>
@@ -276,84 +174,135 @@ const SIGNAL_CONFIG = {
 
 function IndexSkewCard({ data }: { data: IndexSkewData }) {
   const sig = SIGNAL_CONFIG[data.signal]
-  const ivRankColor =
-    data.ivRank > 70 ? '#f87171' :
-    data.ivRank > 40 ? '#fbbf24' : '#34d399'
+  const ivRankColor = data.ivRank > 70 ? '#f87171' : data.ivRank > 40 ? '#fbbf24' : '#34d399'
 
   return (
-    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 flex flex-col gap-3 hover:border-[#2a3f64] transition-colors">
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-xl p-3 flex flex-col gap-2.5 hover:border-[#2a3f64] transition-colors">
       {/* Header */}
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-start justify-between gap-1">
         <div>
           <div className="text-[10px] font-mono text-amber-400/80 tracking-widest uppercase">{data.shortName}</div>
-          <div className="text-[11px] text-slate-500">{data.name}</div>
+          <div className="text-[10px] text-slate-300">{data.name}</div>
         </div>
-        <div
-          className="text-[9px] font-mono font-bold px-2 py-0.5 rounded border whitespace-nowrap"
-          style={{ color: sig.color, backgroundColor: sig.bg, borderColor: sig.border }}
-        >
-          {sig.label}
-        </div>
+        <div className="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded border whitespace-nowrap" style={{ color: sig.color, backgroundColor: sig.bg, borderColor: sig.border }}>{sig.label}</div>
       </div>
 
-      {/* ATM IV + IV Rank */}
-      <div className="flex items-center justify-between">
+      {/* ATM IV + Rank */}
+      <div className="flex gap-3">
         <div>
-          <div className="text-[9px] text-slate-700 font-mono">ATM IV</div>
-          <div className="font-mono text-xl font-semibold text-slate-100 tabular-nums">{data.atmIV.toFixed(1)}%</div>
+          <div className="text-[11px] text-slate-400 font-mono">ATM IV</div>
+          <div className="font-mono text-lg font-semibold text-slate-100 tabular-nums leading-tight">{data.atmIV.toFixed(1)}%</div>
         </div>
-        <div className="text-right">
-          <div className="text-[9px] text-slate-700 font-mono">IV Rank</div>
-          <div className="font-mono text-lg font-semibold tabular-nums" style={{ color: ivRankColor }}>
-            {data.ivRank}
-            <span className="text-sm opacity-60">/100</span>
-          </div>
+        <div>
+          <div className="text-[11px] text-slate-400 font-mono">IV Rank</div>
+          <div className="font-mono text-lg font-semibold tabular-nums leading-tight" style={{ color: ivRankColor }}>{data.ivRank}<span className="text-xs opacity-50">/100</span></div>
+        </div>
+        <div className="ml-auto text-right">
+          <div className="text-[11px] text-slate-400 font-mono">Put Skew</div>
+          <div className="font-mono text-xs text-amber-400">+{data.skewSlope.toFixed(1)}v</div>
+          <div className="text-[11px] text-slate-400 font-mono mt-0.5">Imp ±{data.impMove1W.toFixed(2)}%</div>
         </div>
       </div>
 
       {/* Skew curve */}
       <SkewCurveSVG curve={data.curve} />
 
-      {/* IV values row */}
-      <div className="flex justify-between">
-        {data.curve.map((p) => (
-          <div key={p.label} className="text-center">
-            <div className="font-mono text-[11px] tabular-nums text-slate-300">{p.iv.toFixed(1)}</div>
+      {/* ── Walls strip — visually prominent ── */}
+      <div className="rounded-lg border border-[#1a2540] bg-[#070b14] p-2 space-y-1.5">
+        {/* Call Wall */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-sm" style={{ backgroundColor: '#38bdf8' }} />
+            <span className="text-[12px] font-mono text-slate-500">Call Wall</span>
           </div>
-        ))}
-      </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="font-mono text-sm font-bold tabular-nums"
+              style={{ color: '#38bdf8', textShadow: '0 0 8px rgba(56,189,248,0.6)' }}
+            >
+              {fmtStrike(data.callWall)}
+            </span>
+            <span className="text-[11px] font-mono text-sky-400/50">
+              +{(((data.callWall - data.currentPrice) / data.currentPrice) * 100).toFixed(1)}%
+            </span>
+          </div>
+        </div>
 
-      {/* Skew slope + implied moves */}
-      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#1a2540]">
-        <div>
-          <div className="text-[9px] text-slate-700 font-mono">Put Skew</div>
-          <div className="font-mono text-xs text-amber-400">+{data.skewSlope.toFixed(1)} vol</div>
+        {/* Max Pain — bold emphasis */}
+        <div className="flex items-center justify-between rounded border border-amber-400/25 bg-amber-400/[0.06] px-1.5 py-1">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: '#fbbf24' }} />
+            <span className="text-[12px] font-mono text-amber-400 font-bold tracking-wide">MAX PAIN</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="font-mono text-sm font-bold tabular-nums"
+              style={{ color: '#fbbf24', textShadow: '0 0 10px rgba(251,191,36,0.7)' }}
+            >
+              {fmtStrike(data.maxPain)}
+            </span>
+            <span className="text-[11px] font-mono text-amber-400/50">
+              {data.maxPain > data.currentPrice ? '+' : ''}{(((data.maxPain - data.currentPrice) / data.currentPrice) * 100).toFixed(1)}%
+            </span>
+          </div>
         </div>
-        <div>
-          <div className="text-[9px] text-slate-700 font-mono">Imp. Move 1W</div>
-          <div className="font-mono text-xs text-slate-300">±{data.impMove1W.toFixed(2)}%</div>
-        </div>
-        <div>
-          <div className="text-[9px] text-slate-700 font-mono">Imp. Move 1M</div>
-          <div className="font-mono text-xs text-slate-300">±{data.impMove1M.toFixed(1)}%</div>
-        </div>
-      </div>
 
-      {/* Walls */}
-      <div className="grid grid-cols-3 gap-1 text-[9px] font-mono">
-        <div>
-          <span className="text-slate-700">Call Wall </span>
-          <span className="text-sky-400">{fmtStrike(data.callWall)}</span>
-        </div>
-        <div>
-          <span className="text-slate-700">Max Pain </span>
-          <span className="text-slate-400">{fmtStrike(data.maxPain)}</span>
-        </div>
-        <div className="text-right">
-          <span className="text-slate-700">Put Wall </span>
-          <span className="text-amber-400">{fmtStrike(data.putWall)}</span>
+        {/* Put Wall */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-sm" style={{ backgroundColor: '#fbbf24', opacity: 0.7 }} />
+            <span className="text-[12px] font-mono text-slate-500">Put Wall</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="font-mono text-sm font-bold tabular-nums"
+              style={{ color: '#f59e0b', textShadow: '0 0 6px rgba(245,158,11,0.5)' }}
+            >
+              {fmtStrike(data.putWall)}
+            </span>
+            <span className="text-[11px] font-mono text-amber-500/50">
+              {(((data.putWall - data.currentPrice) / data.currentPrice) * 100).toFixed(1)}%
+            </span>
+          </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+export function IndexSkewGrid({ skewData }: { skewData: IndexSkewData[] }) {
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      {skewData.map((d) => <IndexSkewCard key={d.symbol} data={d} />)}
+    </div>
+  )
+}
+
+// ─── Index Skew Heads (Simplified) ────────────────────────────────────────────
+
+const SKEW_SIGNAL_COLORS = {
+  heavy_skew: { label: 'HEAVY SKEW', color: '#f87171', bg: 'rgba(248,113,113,0.12)', border: 'rgba(248,113,113,0.35)' },
+  elevated:   { label: 'ELEVATED',   color: '#fbbf24', bg: 'rgba(251,191,36,0.12)',  border: 'rgba(251,191,36,0.35)' },
+  neutral:    { label: 'NEUTRAL',    color: '#94a3b8', bg: 'rgba(148,163,184,0.08)', border: 'rgba(148,163,184,0.25)' },
+  complacent: { label: 'COMPLACENT', color: '#38bdf8', bg: 'rgba(56,189,248,0.12)',  border: 'rgba(56,189,248,0.35)' },
+} as const
+
+export function IndexSkewHeads({ skewData }: { skewData: IndexSkewData[] }) {
+  return (
+    <div className="flex flex-wrap gap-2 items-center">
+      {skewData.map((d) => {
+        const sig = SKEW_SIGNAL_COLORS[d.signal]
+        return (
+          <div key={d.symbol} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border bg-[#0c1221] hover:border-[#2a3f64] transition-colors"
+            style={{ borderColor: sig.border }}>
+            <span className="text-[10px] font-mono font-bold text-slate-100 uppercase">{d.shortName}</span>
+            <span className="text-[11px] font-mono px-1.5 py-0.5 rounded border whitespace-nowrap"
+              style={{ color: sig.color, backgroundColor: sig.bg, borderColor: sig.border }}>
+              {sig.label}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -361,27 +310,42 @@ function IndexSkewCard({ data }: { data: IndexSkewData }) {
 // ─── OI Wall Chart ────────────────────────────────────────────────────────────
 
 function OIWallChart({ title, bars, currentPrice, maxPain, callWall, putWall }: {
-  title: string
-  bars: OIBar[]
-  currentPrice: number
-  maxPain: number
-  callWall: number
-  putWall: number
+  title: string; bars: OIBar[]
+  currentPrice: number; maxPain: number; callWall: number; putWall: number
 }) {
   const maxOI = Math.max(...bars.flatMap((b) => [b.callOI, b.putOI]))
 
   return (
-    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">{title} — OI Walls</h3>
-        <div className="flex items-center gap-3 text-[9px] font-mono">
-          <span style={{ color: 'rgba(251,191,36,0.7)' }}>■ Puts</span>
-          <span style={{ color: 'rgba(56,189,248,0.8)' }}>■ Calls</span>
-          <span className="text-slate-700">▬ Max Pain</span>
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-xl p-3">
+      {/* Header with summary strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2">
+          <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">{title} — OI Walls</h3>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-sky-400/30 bg-sky-400/8">
+            <span className="text-[11px] font-mono text-slate-500">CALL WALL</span>
+            <span className="font-mono text-xs font-bold" style={{ color: '#38bdf8', textShadow: '0 0 6px rgba(56,189,248,0.5)' }}>{fmtStrike(callWall)}</span>
+          </div>
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-amber-400/40 bg-amber-400/10">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-[11px] font-mono text-amber-400/70">MAX PAIN</span>
+            <span className="font-mono text-xs font-bold" style={{ color: '#fbbf24', textShadow: '0 0 8px rgba(251,191,36,0.6)' }}>{fmtStrike(maxPain)}</span>
+          </div>
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded border border-amber-500/25 bg-amber-500/6">
+            <span className="text-[11px] font-mono text-slate-500">PUT WALL</span>
+            <span className="font-mono text-xs font-bold text-amber-500">{fmtStrike(putWall)}</span>
+          </div>
         </div>
       </div>
 
-      <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: '280px' }}>
+      <div className="flex items-center justify-between text-[12px] font-mono text-slate-400 mb-1 px-1">
+        <span>← Puts</span>
+        <span className="text-slate-500">Strike</span>
+        <span>Calls →</span>
+      </div>
+
+      <div className="space-y-0.5 overflow-y-auto" style={{ maxHeight: '260px' }}>
         {[...bars].reverse().map((bar) => {
           const callW = (bar.callOI / maxOI) * 100
           const putW  = (bar.putOI  / maxOI) * 100
@@ -391,65 +355,236 @@ function OIWallChart({ title, bars, currentPrice, maxPain, callWall, putWall }: 
           const isPutWall  = bar.strike === putWall
 
           return (
-            <div
-              key={bar.strike}
-              className={cn(
-                'flex items-center gap-2 px-1 py-0.5 rounded transition-colors text-[10px] font-mono',
-                isCurrent  ? 'bg-slate-700/20' : '',
-                isCallWall ? 'bg-sky-400/5'    : '',
-                isPutWall  ? 'bg-amber-400/5'  : '',
-              )}
-            >
-              {/* Put bar (left, fills right-to-left) */}
-              <div className="w-24 flex justify-end">
-                <div className="relative h-3 w-full flex items-center justify-end">
-                  <div
-                    className="h-full rounded-l"
-                    style={{ width: `${putW}%`, backgroundColor: isPutWall ? '#f59e0b' : 'rgba(251,191,36,0.5)', minWidth: putW > 0 ? '2px' : 0 }}
-                  />
+            <div key={bar.strike} className={cn('flex items-center gap-1.5 px-1 py-[2px] rounded text-[10px] font-mono',
+              isCallWall ? 'bg-sky-400/8 border border-sky-400/20' :
+              isMaxPain  ? 'bg-amber-400/10 border border-amber-400/30' :
+              isPutWall  ? 'bg-amber-500/6 border border-amber-500/15' :
+              isCurrent  ? 'bg-slate-700/15 border border-transparent' : 'border border-transparent'
+            )}>
+              {/* Put bar */}
+              <div className="w-28 flex justify-end">
+                <div className="h-3.5 flex items-center justify-end" style={{ width: '100%' }}>
+                  {putW > 0 && (
+                    <div className="h-full rounded-l" style={{
+                      width: `${putW}%`,
+                      backgroundColor: isPutWall ? '#f59e0b' : 'rgba(251,191,36,0.45)',
+                      boxShadow: isPutWall ? '0 0 6px rgba(245,158,11,0.5)' : undefined,
+                    }} />
+                  )}
                 </div>
               </div>
 
               {/* Strike label */}
-              <div
-                className={cn(
-                  'w-16 text-center tabular-nums shrink-0',
-                  isCurrent  ? 'text-slate-100 font-semibold' :
-                  isMaxPain  ? 'text-slate-400' :
-                  isCallWall ? 'text-sky-400' :
-                  isPutWall  ? 'text-amber-400' : 'text-slate-700',
-                )}
-              >
+              <div className={cn('w-[4.5rem] text-center shrink-0 tabular-nums',
+                isCurrent  ? 'text-slate-200 font-bold' :
+                isMaxPain  ? 'text-amber-400 font-bold' :
+                isCallWall ? 'text-sky-400 font-bold'   :
+                isPutWall  ? 'text-amber-500 font-bold' : 'text-slate-400'
+              )}>
                 {fmtStrike(bar.strike)}
-                {isCurrent  && <span className="ml-1 text-[8px] text-slate-500">←</span>}
-                {isMaxPain  && <span className="ml-1 text-[8px] text-slate-600">MP</span>}
-                {isCallWall && <span className="ml-1 text-[8px] text-sky-500">CW</span>}
-                {isPutWall  && <span className="ml-1 text-[8px] text-amber-500">PW</span>}
+                {isCallWall && <span className="ml-0.5 text-[10px] text-sky-500"> CW</span>}
+                {isMaxPain  && <span className="ml-0.5 text-[10px] text-amber-400"> ★</span>}
+                {isPutWall  && <span className="ml-0.5 text-[10px] text-amber-500"> PW</span>}
+                {isCurrent  && <span className="ml-0.5 text-[10px] text-slate-500"> ←</span>}
               </div>
 
-              {/* Call bar (right) */}
-              <div className="w-24">
-                <div
-                  className="h-3 rounded-r"
-                  style={{ width: `${callW}%`, backgroundColor: isCallWall ? '#38bdf8' : 'rgba(56,189,248,0.55)', minWidth: callW > 0 ? '2px' : 0 }}
-                />
+              {/* Call bar */}
+              <div className="w-28">
+                {callW > 0 && (
+                  <div className="h-3.5 rounded-r" style={{
+                    width: `${callW}%`,
+                    backgroundColor: isCallWall ? '#38bdf8' : 'rgba(56,189,248,0.5)',
+                    boxShadow: isCallWall ? '0 0 8px rgba(56,189,248,0.6)' : undefined,
+                  }} />
+                )}
               </div>
 
-              {/* OI numbers */}
-              <div className="hidden xl:flex gap-2 text-[8px] text-slate-800 tabular-nums ml-1">
-                <span>{bar.putOI}K</span>
-                <span>/</span>
-                <span>{bar.callOI}K</span>
+              {/* OI labels on wide screens */}
+              <div className="hidden 2xl:flex gap-1 text-[11px] text-slate-800 tabular-nums ml-0.5 shrink-0">
+                <span>{bar.putOI}K</span><span>/</span><span>{bar.callOI}K</span>
               </div>
             </div>
           )
         })}
       </div>
+    </div>
+  )
+}
 
-      <div className="flex justify-between mt-3 pt-2 border-t border-[#1a2540] text-[9px] font-mono text-slate-700">
-        <span>← Puts (OI in thousands)</span>
-        <span>Calls (OI in thousands) →</span>
+export interface OIWallsGridProps {
+  selectedAssets?: string[]
+  onAssetsChange?: (assets: string[]) => void
+}
+
+export function OIWallsGrid({ selectedAssets = ['SPX', 'NDX'], onAssetsChange }: OIWallsGridProps) {
+  const getOIDataForAsset = (asset: string) => {
+    // Return mock data for indices
+    if (asset === 'SPX') {
+      return { bars: SPX_WALLS, currentPrice: INDEX_SKEW_MOCK[0].currentPrice, maxPain: INDEX_SKEW_MOCK[0].maxPain, callWall: INDEX_SKEW_MOCK[0].callWall, putWall: INDEX_SKEW_MOCK[0].putWall }
+    }
+    if (asset === 'NDX') {
+      return { bars: NDX_WALLS, currentPrice: INDEX_SKEW_MOCK[1].currentPrice, maxPain: INDEX_SKEW_MOCK[1].maxPain, callWall: INDEX_SKEW_MOCK[1].callWall, putWall: INDEX_SKEW_MOCK[1].putWall }
+    }
+    if (asset === 'DJI') {
+      return { bars: NDX_WALLS, currentPrice: INDEX_SKEW_MOCK[2].currentPrice, maxPain: INDEX_SKEW_MOCK[2].maxPain, callWall: INDEX_SKEW_MOCK[2].callWall, putWall: INDEX_SKEW_MOCK[2].putWall }
+    }
+    if (asset === 'RUT') {
+      return { bars: SPX_WALLS, currentPrice: INDEX_SKEW_MOCK[3].currentPrice, maxPain: INDEX_SKEW_MOCK[3].maxPain, callWall: INDEX_SKEW_MOCK[3].callWall, putWall: INDEX_SKEW_MOCK[3].putWall }
+    }
+
+    // Generate mock data for custom stocks
+    const charCode = asset.charCodeAt(0)
+    const mockPrice = 50 + (charCode % 200)
+    const mockBars: OIBar[] = [
+      { strike: mockPrice - 20, callOI: 5, putOI: 45 },
+      { strike: mockPrice - 15, callOI: 12, putOI: 38 },
+      { strike: mockPrice - 10, callOI: 22, putOI: 65 },
+      { strike: mockPrice - 5, callOI: 35, putOI: 75 },
+      { strike: mockPrice, callOI: 48, putOI: 52 },
+      { strike: mockPrice + 5, callOI: 65, putOI: 28 },
+      { strike: mockPrice + 10, callOI: 85, putOI: 15 },
+      { strike: mockPrice + 15, callOI: 45, putOI: 8 },
+      { strike: mockPrice + 20, callOI: 25, putOI: 3 },
+    ]
+
+    return {
+      bars: mockBars,
+      currentPrice: mockPrice,
+      maxPain: mockPrice + 2,
+      callWall: mockPrice + 10,
+      putWall: mockPrice - 10
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Asset selector search bar */}
+      <OIWallAssetSelector currentAssets={selectedAssets} onAssetsChange={onAssetsChange} />
+
+      {/* OI Walls in 3-column grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        {selectedAssets.map((asset) => {
+          const data = getOIDataForAsset(asset)
+          return (
+            <OIWallChart
+              key={asset}
+              title={asset}
+              bars={data.bars}
+              currentPrice={data.currentPrice}
+              maxPain={data.maxPain}
+              callWall={data.callWall}
+              putWall={data.putWall}
+            />
+          )
+        })}
       </div>
+    </div>
+  )
+}
+
+// ─── OI Wall Asset Selector ────────────────────────────────────────────────────
+
+const AVAILABLE_OI_ASSETS = [
+  { symbol: 'SPX', name: 'S&P 500', color: '#3b82f6' },
+  { symbol: 'NDX', name: 'NASDAQ 100', color: '#8b5cf6' },
+  { symbol: 'DJI', name: 'Dow Jones', color: '#ec4899' },
+  { symbol: 'RUT', name: 'Russell 2000', color: '#f59e0b' },
+] as const
+
+function OIWallAssetSelector({ currentAssets, onAssetsChange }: { currentAssets: string[]; onAssetsChange?: (assets: string[]) => void }) {
+  const toggleAsset = (asset: string) => {
+    let newAssets: string[]
+    if (currentAssets.includes(asset.toUpperCase())) {
+      newAssets = currentAssets.filter((a) => a !== asset.toUpperCase())
+    } else {
+      newAssets = [...currentAssets, asset.toUpperCase()].sort()
+    }
+    onAssetsChange?.(newAssets)
+  }
+
+  const removeAsset = (asset: string) => {
+    const newAssets = currentAssets.filter((a) => a !== asset)
+    onAssetsChange?.(newAssets)
+  }
+
+  const getAssetColor = (symbol: string) => {
+    const found = AVAILABLE_OI_ASSETS.find((a) => a.symbol === symbol)
+    if (found) return found.color
+    // Generate a consistent color for custom stocks based on their symbol
+    const charCode = symbol.charCodeAt(0)
+    const colors = ['#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#a78bfa', '#ec4899', '#14b8a6', '#f97316']
+    return colors[charCode % colors.length]
+  }
+
+  return (
+    <div className="flex items-center gap-2 p-2.5 bg-[#0c1221]/50 rounded-lg border border-[#1a2540]/50">
+      {/* Label */}
+      <span className="text-[12px] font-mono text-slate-300 uppercase tracking-widest shrink-0 whitespace-nowrap">OI Walls:</span>
+
+      {/* Quick index buttons */}
+      <div className="flex gap-1 shrink-0">
+        {AVAILABLE_OI_ASSETS.map((asset) => (
+          <button
+            key={asset.symbol}
+            onClick={() => toggleAsset(asset.symbol)}
+            className={cn(
+              'px-1.5 py-0.5 rounded border text-[12px] font-mono font-semibold uppercase transition-all cursor-pointer hover:opacity-80 whitespace-nowrap',
+              currentAssets.includes(asset.symbol)
+                ? 'border-current bg-current/15 text-current'
+                : 'border-slate-600/30 bg-slate-700/10 text-slate-500 hover:border-slate-500/50'
+            )}
+            style={currentAssets.includes(asset.symbol) ? {
+              borderColor: asset.color,
+              backgroundColor: `${asset.color}15`,
+              color: asset.color
+            } : undefined}
+            title={asset.name}
+          >
+            {asset.symbol}
+          </button>
+        ))}
+      </div>
+
+      {/* Selected custom stocks */}
+      <div className="flex gap-1 flex-wrap shrink-0">
+        {currentAssets.filter((a) => !AVAILABLE_OI_ASSETS.find((idx) => idx.symbol === a)).map((symbol) => (
+          <div
+            key={symbol}
+            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[12px] font-mono font-semibold uppercase whitespace-nowrap"
+            style={{
+              borderColor: getAssetColor(symbol),
+              backgroundColor: `${getAssetColor(symbol)}15`,
+              color: getAssetColor(symbol)
+            }}
+          >
+            <span>{symbol}</span>
+            <button
+              onClick={() => removeAsset(symbol)}
+              className="ml-0.5 hover:opacity-70 transition-opacity"
+              title={`Remove ${symbol}`}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Search input for custom stocks */}
+      <input
+        type="text"
+        placeholder="Add Stock"
+        onKeyDown={(e) => {
+          const input = e.currentTarget as HTMLInputElement
+          if (e.key === 'Enter' && input.value.trim()) {
+            const ticker = input.value.trim().toUpperCase()
+            if (ticker.length <= 5 && /^[A-Z0-9]+$/.test(ticker)) {
+              toggleAsset(ticker)
+              input.value = ''
+            }
+          }
+        }}
+        className="ml-auto px-2 py-0.5 rounded border border-[#1a2540] bg-[#0c1221] text-slate-200 text-[12px] font-mono placeholder-slate-400 focus:outline-none focus:border-slate-500 transition-colors w-48"
+      />
     </div>
   )
 }
@@ -458,103 +593,61 @@ function OIWallChart({ title, bars, currentPrice, maxPain, callWall, putWall }: 
 
 export const INDEX_SKEW_MOCK: IndexSkewData[] = [
   {
-    symbol: '^GSPC', name: 'S&P 500', shortName: 'SPX',
-    currentPrice: 5847, atmIV: 14.8, ivRank: 28, skewSlope: 4.2,
-    impMove1W: 0.82, impMove1M: 2.4,
+    symbol: '^GSPC', name: 'S&P 500', shortName: 'SPX', currentPrice: 5823,
+    atmIV: 14.8, ivRank: 28, skewSlope: 4.2, impMove1W: 0.82, impMove1M: 2.4,
     curve: [{ label: '25P', iv: 19.2 }, { label: '10P', iv: 17.1 }, { label: 'ATM', iv: 14.8 }, { label: '10C', iv: 12.9 }, { label: '25C', iv: 11.4 }],
-    callWall: 5900, putWall: 5750, maxPain: 5820, signal: 'elevated',
+    callWall: 5900, putWall: 5700, maxPain: 5800, signal: 'elevated',
   },
   {
-    symbol: '^NDX', name: 'NASDAQ 100', shortName: 'NDX',
-    currentPrice: 20843, atmIV: 16.4, ivRank: 32, skewSlope: 5.1,
-    impMove1W: 1.12, impMove1M: 3.1,
+    symbol: '^NDX', name: 'NASDAQ 100', shortName: 'NDX', currentPrice: 20724,
+    atmIV: 16.4, ivRank: 32, skewSlope: 5.1, impMove1W: 1.12, impMove1M: 3.1,
     curve: [{ label: '25P', iv: 21.8 }, { label: '10P', iv: 19.2 }, { label: 'ATM', iv: 16.4 }, { label: '10C', iv: 14.1 }, { label: '25C', iv: 12.4 }],
-    callWall: 21000, putWall: 20500, maxPain: 20800, signal: 'elevated',
+    callWall: 21000, putWall: 20500, maxPain: 20750, signal: 'elevated',
   },
   {
-    symbol: '^DJI', name: 'DOW JONES', shortName: 'DJI',
-    currentPrice: 42318, atmIV: 12.2, ivRank: 22, skewSlope: 3.1,
-    impMove1W: 0.64, impMove1M: 1.8,
+    symbol: '^DJI', name: 'DOW JONES', shortName: 'DJI', currentPrice: 42186,
+    atmIV: 12.2, ivRank: 22, skewSlope: 3.1, impMove1W: 0.64, impMove1M: 1.8,
     curve: [{ label: '25P', iv: 15.8 }, { label: '10P', iv: 14.1 }, { label: 'ATM', iv: 12.2 }, { label: '10C', iv: 11.0 }, { label: '25C', iv: 9.8 }],
     callWall: 43000, putWall: 42000, maxPain: 42200, signal: 'neutral',
   },
   {
-    symbol: '^RUT', name: 'RUSSELL 2000', shortName: 'RUT',
-    currentPrice: 2109, atmIV: 19.8, ivRank: 44, skewSlope: 6.8,
-    impMove1W: 1.48, impMove1M: 4.2,
+    symbol: '^RUT', name: 'RUSSELL 2000', shortName: 'RUT', currentPrice: 2097,
+    atmIV: 19.8, ivRank: 44, skewSlope: 6.8, impMove1W: 1.48, impMove1M: 4.2,
     curve: [{ label: '25P', iv: 27.2 }, { label: '10P', iv: 23.8 }, { label: 'ATM', iv: 19.8 }, { label: '10C', iv: 16.4 }, { label: '25C', iv: 13.8 }],
-    callWall: 2200, putWall: 2050, maxPain: 2100, signal: 'heavy_skew',
+    callWall: 2150, putWall: 2050, maxPain: 2100, signal: 'heavy_skew',
   },
 ]
 
 const SPX_WALLS: OIBar[] = [
-  { strike: 5600, callOI: 12, putOI: 48 }, { strike: 5650, callOI: 18, putOI: 42 },
-  { strike: 5700, callOI: 24, putOI: 68 }, { strike: 5750, callOI: 32, putOI: 92 },
-  { strike: 5800, callOI: 45, putOI: 62 }, { strike: 5820, callOI: 38, putOI: 45 },
-  { strike: 5850, callOI: 52, putOI: 38 }, { strike: 5900, callOI: 108, putOI: 22 },
-  { strike: 5950, callOI: 72, putOI: 14 }, { strike: 6000, callOI: 88, putOI: 8 },
-  { strike: 6050, callOI: 45, putOI: 4 },  { strike: 6100, callOI: 28, putOI: 2 },
+  { strike: 5600, callOI: 10, putOI: 52 }, { strike: 5650, callOI: 16, putOI: 44 },
+  { strike: 5700, callOI: 22, putOI: 72 }, { strike: 5750, callOI: 30, putOI: 88 },
+  { strike: 5800, callOI: 42, putOI: 58 }, { strike: 5823, callOI: 36, putOI: 42 },
+  { strike: 5850, callOI: 50, putOI: 34 }, { strike: 5900, callOI: 115, putOI: 20 },
+  { strike: 5950, callOI: 68, putOI: 12 }, { strike: 6000, callOI: 82, putOI: 8 },
+  { strike: 6050, callOI: 44, putOI: 4 },  { strike: 6100, callOI: 26, putOI: 2 },
 ]
 
 const NDX_WALLS: OIBar[] = [
-  { strike: 19500, callOI: 8,   putOI: 42 }, { strike: 19800, callOI: 12,  putOI: 58 },
-  { strike: 20000, callOI: 18,  putOI: 72 }, { strike: 20200, callOI: 28,  putOI: 88 },
-  { strike: 20500, callOI: 35,  putOI: 98 }, { strike: 20700, callOI: 42,  putOI: 62 },
-  { strike: 20843, callOI: 48,  putOI: 48 }, { strike: 21000, callOI: 118, putOI: 28 },
-  { strike: 21200, callOI: 85,  putOI: 18 }, { strike: 21500, callOI: 65,  putOI: 8  },
-  { strike: 22000, callOI: 45,  putOI: 4  }, { strike: 22500, callOI: 28,  putOI: 2  },
+  { strike: 19500, callOI: 7,   putOI: 44 }, { strike: 19800, callOI: 11,  putOI: 60 },
+  { strike: 20000, callOI: 16,  putOI: 78 }, { strike: 20200, callOI: 25,  putOI: 92 },
+  { strike: 20500, callOI: 33,  putOI: 102}, { strike: 20724, callOI: 46,  putOI: 52 },
+  { strike: 20750, callOI: 48,  putOI: 46 }, { strike: 21000, callOI: 124, putOI: 26 },
+  { strike: 21200, callOI: 80,  putOI: 16 }, { strike: 21500, callOI: 60,  putOI: 7  },
+  { strike: 22000, callOI: 42,  putOI: 3  }, { strike: 22500, callOI: 25,  putOI: 1  },
 ]
 
-// ─── Public Props ─────────────────────────────────────────────────────────────
+// ─── Public Props / Main Export ───────────────────────────────────────────────
 
 export interface OptionsSectionProps {
   skewData?: IndexSkewData[]
 }
 
-// ─── Main Export ──────────────────────────────────────────────────────────────
-
 export function OptionsSection({ skewData = INDEX_SKEW_MOCK }: OptionsSectionProps) {
   return (
-    <section className="space-y-4">
-      {/* Expiration Calendar */}
-      <ExpirationCalendar />
-
-      {/* Index Skew Cards */}
-      <div>
-        <div className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-2">
-          Index Options Skew · Put / Call Implied Volatility
-        </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {skewData.map((d) => (
-            <IndexSkewCard key={d.symbol} data={d} />
-          ))}
-        </div>
-      </div>
-
-      {/* Put/Call OI Walls */}
-      <div>
-        <div className="text-[10px] font-mono text-slate-600 uppercase tracking-widest mb-2">
-          Put / Call Open Interest Walls · CW = Call Wall · PW = Put Wall · MP = Max Pain
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <OIWallChart
-            title="SPX"
-            bars={SPX_WALLS}
-            currentPrice={INDEX_SKEW_MOCK[0].currentPrice}
-            maxPain={INDEX_SKEW_MOCK[0].maxPain}
-            callWall={INDEX_SKEW_MOCK[0].callWall}
-            putWall={INDEX_SKEW_MOCK[0].putWall}
-          />
-          <OIWallChart
-            title="NDX"
-            bars={NDX_WALLS}
-            currentPrice={INDEX_SKEW_MOCK[1].currentPrice}
-            maxPain={INDEX_SKEW_MOCK[1].maxPain}
-            callWall={INDEX_SKEW_MOCK[1].callWall}
-            putWall={INDEX_SKEW_MOCK[1].putWall}
-          />
-        </div>
-      </div>
+    <section className="space-y-3">
+      <ExpirationCalendarBanner />
+      <IndexSkewGrid skewData={skewData} />
+      <OIWallsGrid />
     </section>
   )
 }
