@@ -38,7 +38,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { IBTickFields } from '@/app/api/live-futures/route'
+import type { IBTickFields } from '@/types/futures'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
