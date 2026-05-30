@@ -20,9 +20,7 @@ const nextConfig: NextConfig = {
   turbopack: { root: process.cwd() },
   // Treat @prisma/client as an external package to avoid tracing issues
   // during server builds (Prisma's instrumentation can interfere with bundling).
-  experimental: {
-    serverExternalPackages: ['@prisma/client'],
-  } as any,
+  serverExternalPackages: ['@prisma/client'],
 };
 
 export default nextConfig;
