@@ -10,18 +10,43 @@ export interface UseMarketNodesState {
   lastUpdated: number | null
 }
 
+// ─── Poll constants ───────────────────────────────────────────────────────────
+const MIN_POLL_MS      = 30_000       // 30 s  — minimum between any two fetches
+const MAX_BACK_OFF_MS  = 5 * 60_000   // 5 min — ceiling for exponential back-off
+const MAX_CONSEC_ERR   = 5            // after this many consecutive failures, back off fully
+
 /**
- * Hook to fetch market data for a specific category
- * Automatically polls based on refresh intervals from market registry
+ * useMarketNodes — controlled market-data subscription hook.
  *
- * Usage:
- * const { data, isLoading } = useMarketNodes('fx', 30000, '1D')
+ * Dependency contract:
+ *   The single useEffect has deps [category, timeframe].  That is the complete
+ *   list of values that should trigger a new fetch + poll restart:
+ *     • category change  → different instrument set, full restart
+ *     • timeframe change → different historical slice, full restart
+ *     • pollInterval     → written to a ref; no restart needed
+ *   Internal implementation details (fetchData function, abort controller, seq
+ *   counter) are stored in refs so they never appear in deps arrays and never
+ *   cause spurious re-runs.
+ *
+ * Race-condition contract:
+ *   When [category, timeframe] changes the effect cleanup:
+ *     1. Aborts the in-flight HTTP request via AbortController
+ *     2. Clears any pending setTimeout so the old poll loop cannot reschedule
+ *   The new effect body then starts a fresh single fetch + poll chain.
+ *   A monotonic seqRef discards responses that arrive after a newer request
+ *   has already been issued (belt-and-braces on top of the abort).
+ *
+ * Error back-off contract:
+ *   On error the retry delay is the full pollInterval (≥ 30 s).  The 10-second
+ *   shortcut that was in the original code was the direct cause of 429 storms
+ *   under Yahoo rate-limiting.
  */
 export function useMarketNodes(
   category: 'fx' | 'commodity' | 'index',
-  pollInterval = 30000,
+  pollInterval = MIN_POLL_MS,
   timeframe: '1D' | '5D' | '1M' | '3M' = '1D'
-): UseMarketNodesState & { refetch: () => Promise<void>; node: (id: string) => MarketNode | null } {
+): UseMarketNodesState & { refetch: () => void; node: (id: string) => MarketNode | null } {
+
   const [state, setState] = useState<UseMarketNodesState>({
     data: null,
     isLoading: true,
@@ -29,87 +54,132 @@ export function useMarketNodes(
     lastUpdated: null,
   })
 
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const isMountedRef = useRef(true)
+  // ── Refs that carry runtime values without causing effect re-runs ──────────
+  const pollRef      = useRef(Math.max(pollInterval, MIN_POLL_MS))
+  pollRef.current    = Math.max(pollInterval, MIN_POLL_MS)   // updated every render, never triggers effect
 
-  const fetchData = useCallback(async () => {
+  const timerRef     = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef     = useRef<AbortController | null>(null)
+  const seqRef       = useRef(0)
+  const mountedRef   = useRef(false)
+  const consecErrRef = useRef(0)   // consecutive error counter for exponential back-off
+
+  // ── fetchData stored in a ref so the timer callback always has the latest
+  //    implementation without needing to appear in any dependency array.
+  //    All state it touches comes from refs above.
+  const fetchDataRef = useRef<() => Promise<void>>(async () => {})
+  fetchDataRef.current = async () => {
+    // Abort previous in-flight request; create fresh controller for this call
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+
+    // Cancel any pending retry/poll timer so we don't double-schedule
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+
+    const mySeq = ++seqRef.current
+
+    // Flip isLoading only on cold start (no data yet) to suppress background shimmer
+    setState(prev => ({ ...prev, isLoading: prev.data === null, error: null }))
+
     try {
-      setState(prev => ({ ...prev, isLoading: true, error: null }))
-
-      // Fetch from server-side API endpoint to avoid CORS issues
-      const response = await fetch(`/api/market-nodes?category=${category}&timeframe=${timeframe}`, {
+      const url = `/api/market-nodes?category=${category}&timeframe=${timeframe}`
+      const res = await fetch(url, {
+        signal: ctrl.signal,
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
       })
 
-      if (!response.ok) {
-        throw new Error(`API returned ${response.status}: ${response.statusText}`)
-      }
+      if (!res.ok) throw new Error(`API returned ${res.status}: ${res.statusText}`)
 
-      const snapshot = await response.json()
+      const snapshot: MarketDataSnapshot = await res.json()
 
-      if (isMountedRef.current) {
-        setState({
-          data: snapshot,
-          isLoading: false,
-          error: null,
-          lastUpdated: Date.now(),
-        })
+      // Discard stale response if a newer request already superseded this one
+      if (mySeq !== seqRef.current || !mountedRef.current) return
 
-        // Schedule next fetch
-        timeoutRef.current = setTimeout(fetchData, pollInterval)
-      }
+      // Successful fetch — reset error counter and schedule next normal poll
+      consecErrRef.current = 0
+      setState({ data: snapshot, isLoading: false, error: null, lastUpdated: Date.now() })
+      timerRef.current = setTimeout(() => fetchDataRef.current(), pollRef.current)
+
     } catch (err) {
-      if (isMountedRef.current) {
-        const errorMsg = err instanceof Error ? err.message : 'Unknown error'
-        setState(prev => ({
-          ...prev,
-          isLoading: false,
-          error: errorMsg,
-        }))
+      if (err instanceof Error && err.name === 'AbortError') return  // intentional cancel
 
-        // Retry after shorter interval on error
-        timeoutRef.current = setTimeout(fetchData, Math.min(pollInterval, 10000))
-      }
+      if (mySeq !== seqRef.current || !mountedRef.current) return
+
+      // Exponential back-off: double the interval for each consecutive failure,
+      // capped at MAX_BACK_OFF_MS (5 min).  After MAX_CONSEC_ERR failures the
+      // interval stays at the ceiling — we never stop retrying, but we stop
+      // hammering the server with rapid 4xx/5xx responses.
+      consecErrRef.current = Math.min(consecErrRef.current + 1, MAX_CONSEC_ERR)
+      const backOffMs = Math.min(
+        pollRef.current * Math.pow(2, consecErrRef.current - 1),
+        MAX_BACK_OFF_MS
+      )
+
+      setState(prev => ({
+        ...prev,
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      }))
+
+      console.warn(
+        `[useMarketNodes] ${category} fetch error #${consecErrRef.current}; ` +
+        `retrying in ${Math.round(backOffMs / 1000)}s`
+      )
+      timerRef.current = setTimeout(() => fetchDataRef.current(), backOffMs)
     }
-  }, [category, pollInterval, timeframe])
+  }
 
+  // ── Single effect — deps: [category, timeframe] ───────────────────────────
+  // Runs on mount AND whenever category or timeframe changes.
+  // Cleanup fires before each re-run, aborting in-flight requests and
+  // clearing the poll timer so only one loop is ever active.
   useEffect(() => {
-    isMountedRef.current = true
-    fetchData()
+    mountedRef.current = true
+
+    // Abort + clear leftovers from any prior effect invocation
+    abortRef.current?.abort()
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+
+    // New category/timeframe → fresh slate; don't carry over old error counts
+    consecErrRef.current = 0
+
+    fetchDataRef.current()
 
     return () => {
-      isMountedRef.current = false
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      mountedRef.current = false
+      abortRef.current?.abort()
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
     }
-  }, [fetchData])
+  }, [category, timeframe]) // ← explicit, minimal, correct — no internal refs needed
+
+  // ── Stable public API ─────────────────────────────────────────────────────
+  const refetch = useCallback(() => { fetchDataRef.current() }, [])
 
   const getNode = useCallback(
-    (id: string): MarketNode | null => {
-      return state.data?.nodes[id] ?? null
-    },
+    (id: string): MarketNode | null => state.data?.nodes[id] ?? null,
     [state.data]
   )
 
-  return {
-    ...state,
-    refetch: fetchData,
-    node: getNode,
-  }
+  return { ...state, refetch, node: getNode }
 }
 
+
 /**
- * Hook to fetch all market data across categories
- * Useful for dashboards that show multiple categories
+ * useAllMarketNodes — fetches all three categories in parallel.
+ * Same ref-based pattern; single [pollInterval] effect (category is fixed).
  */
 export function useAllMarketNodes(
-  pollInterval = 30000
+  pollInterval = MIN_POLL_MS
 ): UseMarketNodesState & {
-  refetch: () => Promise<void>
+  refetch: () => void
   byCategory: (cat: 'fx' | 'commodity' | 'index') => MarketDataSnapshot | null
   node: (id: string) => MarketNode | null
 } {
-  const [state, setState] = useState<UseMarketNodesState & { allData?: Record<string, MarketDataSnapshot> }>({
+  const [state, setState] = useState<
+    UseMarketNodesState & { allData?: Record<string, MarketDataSnapshot> }
+  >({
     data: null,
     allData: undefined,
     isLoading: true,
@@ -117,119 +187,106 @@ export function useAllMarketNodes(
     lastUpdated: null,
   })
 
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const isMountedRef = useRef(true)
+  const pollRef    = useRef(Math.max(pollInterval, MIN_POLL_MS))
+  pollRef.current  = Math.max(pollInterval, MIN_POLL_MS)
 
-  const fetchData = useCallback(async () => {
+  const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef   = useRef<AbortController | null>(null)
+  const seqRef     = useRef(0)
+  const mountedRef = useRef(false)
+
+  const fetchDataRef = useRef<() => Promise<void>>(async () => {})
+  fetchDataRef.current = async () => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+
+    const mySeq = ++seqRef.current
+    setState(prev => ({ ...prev, isLoading: prev.data === null, error: null }))
+
     try {
-      setState(prev => ({ ...prev, isLoading: true, error: null }))
-
-      // Fetch all three categories in parallel from server-side API endpoints
-      const [fxRes, commodityRes, indexRes] = await Promise.all([
-        fetch('/api/market-nodes?category=fx', {
-          cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
-        }),
-        fetch('/api/market-nodes?category=commodity', {
-          cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
-        }),
-        fetch('/api/market-nodes?category=index', {
-          cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
-        }),
+      const fetchOpts = { signal: ctrl.signal, cache: 'no-store' as const }
+      const [fxRes, commRes, idxRes] = await Promise.all([
+        fetch('/api/market-nodes?category=fx',        fetchOpts),
+        fetch('/api/market-nodes?category=commodity', fetchOpts),
+        fetch('/api/market-nodes?category=index',     fetchOpts),
       ])
 
-      if (!fxRes.ok || !commodityRes.ok || !indexRes.ok) {
-        throw new Error('One or more API endpoints returned an error')
+      if (!fxRes.ok || !commRes.ok || !idxRes.ok) {
+        throw new Error('One or more market-nodes endpoints returned an error')
       }
 
-      const [fxData, commodityData, indexData] = await Promise.all([
-        fxRes.json(),
-        commodityRes.json(),
-        indexRes.json(),
+      const [fxData, commData, idxData]: MarketDataSnapshot[] = await Promise.all([
+        fxRes.json(), commRes.json(), idxRes.json(),
       ])
 
-      const allData = {
-        fx: fxData,
-        commodity: commodityData,
-        index: indexData,
-      }
+      if (mySeq !== seqRef.current || !mountedRef.current) return
 
-      if (isMountedRef.current) {
-        // Merge all data into a single snapshot for compatibility
-        const mergedNodes: Record<string, MarketNode> = {}
-        Object.values(allData).forEach(snapshot => {
-          Object.assign(mergedNodes, snapshot.nodes)
-        })
+      const mergedNodes: Record<string, MarketNode> = {}
+      for (const snap of [fxData, commData, idxData]) Object.assign(mergedNodes, snap.nodes)
 
-        setState({
-          data: {
-            timestamp: Date.now(),
-            nodes: mergedNodes,
-            health: {
-              totalNodes: Object.keys(mergedNodes).length,
-              liveCount: 0,
-              staleCount: 0,
-              disconnectedCount: 0,
-              healthPercent: 0,
-            },
-            sources: {
-              yahoo: { healthy: true, lastSuccessMs: 0 },
-              fred: { healthy: true, lastSuccessMs: 0 },
-            },
+      setState({
+        data: {
+          timestamp: Date.now(),
+          nodes: mergedNodes,
+          health: {
+            totalNodes:        Object.keys(mergedNodes).length,
+            liveCount:         0,
+            staleCount:        0,
+            disconnectedCount: 0,
+            healthPercent:     0,
           },
-          allData,
-          isLoading: false,
-          error: null,
-          lastUpdated: Date.now(),
-        })
+          sources: {
+            alpaca: { healthy: true, lastSuccessMs: 0 },
+            fred:   { healthy: true, lastSuccessMs: 0 },
+          },
+        },
+        allData:     { fx: fxData, commodity: commData, index: idxData },
+        isLoading:   false,
+        error:       null,
+        lastUpdated: Date.now(),
+      })
 
-        timeoutRef.current = setTimeout(fetchData, pollInterval)
-      }
+      timerRef.current = setTimeout(() => fetchDataRef.current(), pollRef.current)
+
     } catch (err) {
-      if (isMountedRef.current) {
-        const errorMsg = err instanceof Error ? err.message : 'Unknown error'
-        setState(prev => ({
-          ...prev,
-          isLoading: false,
-          error: errorMsg,
-        }))
+      if (err instanceof Error && err.name === 'AbortError') return
+      if (mySeq !== seqRef.current || !mountedRef.current) return
 
-        timeoutRef.current = setTimeout(fetchData, Math.min(pollInterval, 10000))
-      }
+      setState(prev => ({
+        ...prev,
+        isLoading: false,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      }))
+      timerRef.current = setTimeout(() => fetchDataRef.current(), pollRef.current)
     }
-  }, [pollInterval])
+  }
 
   useEffect(() => {
-    isMountedRef.current = true
-    fetchData()
-
+    mountedRef.current = true
+    abortRef.current?.abort()
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
+    fetchDataRef.current()
     return () => {
-      isMountedRef.current = false
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      mountedRef.current = false
+      abortRef.current?.abort()
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
     }
-  }, [fetchData])
+  }, []) // pollInterval changes handled via ref — no restart needed
+
+  const refetch = useCallback(() => { fetchDataRef.current() }, [])
 
   const getNode = useCallback(
-    (id: string): MarketNode | null => {
-      return state.data?.nodes[id] ?? null
-    },
+    (id: string): MarketNode | null => state.data?.nodes[id] ?? null,
     [state.data]
   )
-
   const getCategoryData = useCallback(
-    (cat: 'fx' | 'commodity' | 'index'): MarketDataSnapshot | null => {
-      return state.allData?.[cat] ?? null
-    },
-    [state.allData]
+    (cat: 'fx' | 'commodity' | 'index'): MarketDataSnapshot | null =>
+      (state as any).allData?.[cat] ?? null,
+    [state]
   )
 
-  return {
-    ...state,
-    data: state.data,
-    refetch: fetchData,
-    byCategory: getCategoryData,
-    node: getNode,
-  }
+  return { ...state, data: state.data, refetch, byCategory: getCategoryData, node: getNode }
 }

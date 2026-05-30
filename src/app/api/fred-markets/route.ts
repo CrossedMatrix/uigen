@@ -8,6 +8,12 @@ import type {
   DXYPoint,
   DXYData,
 } from '@/types/fred-markets'
+import {
+  fredCacheRead,
+  fredCacheWrite,
+  fredCacheSeedRead,
+  cacheAgeLabel,
+} from '@/lib/services/fredCacheStore'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -73,8 +79,12 @@ async function fetchSeries(seriesId: string, limit = 10): Promise<FREDObservatio
     limit:      String(limit),
   })
 
+  // AbortSignal.timeout caps each individual FRED series request at 8 s.
+  // fred-markets fires 12 parallel requests; without a timeout a single
+  // slow FRED call blocks the entire Promise.all until Next.js 504s.
   const res = await fetch(`${FRED_BASE_URL}?${params}`, {
-    next: { revalidate: REVALIDATE_SECS },
+    next:   { revalidate: REVALIDATE_SECS },
+    signal: AbortSignal.timeout(8_000),
   })
 
   if (!res.ok) {
@@ -116,7 +126,8 @@ async function fetchSeriesHistory(seriesId: string, limitHistory = 260): Promise
   })
 
   const res = await fetch(`${FRED_BASE_URL}?${params}`, {
-    next: { revalidate: REVALIDATE_SECS },
+    next:   { revalidate: REVALIDATE_SECS },
+    signal: AbortSignal.timeout(8_000),
   })
 
   if (!res.ok) {
@@ -166,6 +177,36 @@ async function safeFetchHistory(seriesId: string, limitHistory = 260): Promise<S
   }
 }
 
+// ─── Cache key ────────────────────────────────────────────────────────────────
+
+const CACHE_KEY = 'fred-markets'
+
+// ─── Stale-cache response helper ─────────────────────────────────────────────
+//
+// Tags all three meta blocks (yieldCurve, dxy, overall) as 'CACHED' so every
+// UI badge in the yield curve + DXY panels switches to amber ◐ CACHED · FRED.
+
+function serveStaleCache(
+  data:      FredMarketsData,
+  fetchedAt: number,
+): NextResponse {
+  console.warn(
+    `[fred-markets] FRED unavailable — serving cache ` +
+    `(age: ${cacheAgeLabel(fetchedAt)}, fetched ${new Date(fetchedAt).toISOString()})`,
+  )
+  const ts = new Date().toISOString()
+  const asCached = (m: FredMarketsMeta): FredMarketsMeta =>
+    ({ ...m, status: 'CACHED', timestamp: ts })
+
+  const stale: FredMarketsData = {
+    ...data,
+    yieldCurve: { ...data.yieldCurve, meta: asCached(data.yieldCurve.meta) },
+    dxy:        { ...data.dxy,        meta: asCached(data.dxy.meta)        },
+    meta:       asCached(data.meta),
+  }
+  return NextResponse.json(stale, { status: 200 })
+}
+
 // ─── Mock fallback data ──────────────────────────────────────────────────────
 
 const DEMO_META: FredMarketsMeta = {
@@ -209,12 +250,15 @@ function mockDXY(id: string, label: string, val: number, ch: number): DXYPoint {
   }
 }
 
+// Baseline yields tuned to current real-time benchmark targets (late May 2026):
+// 2Y ≈ 3.88%, 10Y ≈ 4.40%.  52-week high/low bands bracket each tenor so the
+// fallback never reads as stale-flat when FRED is briefly unavailable.
 const MOCK_YIELDS: YieldPoint[] = [
-  mockYield('DTB3',  '3M',  0.25, 5.24, -0.01, 5.42, 4.88),
-  mockYield('DGS2',  '2Y',  2,    4.87, -0.02, 5.13, 3.82),
-  mockYield('DGS5',  '5Y',  5,    4.51, -0.01, 4.78, 3.61),
-  mockYield('DGS10', '10Y', 10,   4.41,  0.01, 4.65, 3.45),
-  mockYield('DGS30', '30Y', 30,   4.62,  0.02, 4.88, 3.72),
+  mockYield('DTB3',  '3M',  0.25, 4.30, -0.01, 4.60, 4.20),
+  mockYield('DGS2',  '2Y',  2,    3.88, -0.02, 4.40, 3.70),
+  mockYield('DGS5',  '5Y',  5,    4.05, -0.01, 4.55, 3.85),
+  mockYield('DGS10', '10Y', 10,   4.40,  0.01, 4.80, 4.05),
+  mockYield('DGS30', '30Y', 30,   4.95,  0.02, 5.15, 4.60),
 ]
 
 const MOCK_RESPONSE: FredMarketsData = {
@@ -374,10 +418,25 @@ function buildDXYFromResult(
 // ─── GET Handler ─────────────────────────────────────────────────────────────
 
 export async function GET() {
-  // ── Guard: no key → immediate demo fallback ──────────────────────────────
+  // ── 0. Read cache (memory → file) ─────────────────────────────────────────
+  const cached = fredCacheRead<FredMarketsData>(CACHE_KEY)
+
+  // ── Guard: no key ──────────────────────────────────────────────────────────
   if (!FRED_API_KEY) {
+    if (cached) return serveStaleCache(cached.entry.data, cached.entry.fetchedAt)
+    const seed = fredCacheSeedRead<FredMarketsData>(CACHE_KEY)
+    if (seed) return serveStaleCache(seed.data, seed.fetchedAt)
     console.warn('[fred-markets] FRED_API_KEY not set – serving mock data')
     return NextResponse.json(MOCK_RESPONSE, { status: 200 })
+  }
+
+  // ── Fresh cache hit — skip all 12 FRED requests ───────────────────────────
+  if (cached?.fresh) {
+    console.info(
+      `[fred-markets] Cache hit (age: ${cacheAgeLabel(cached.entry.fetchedAt)}, ` +
+      `source: ${cached.source}) — skipping FRED fetch`,
+    )
+    return NextResponse.json(cached.entry.data, { status: 200 })
   }
 
   // ── 1. Fire ALL fetches in parallel via safeFetch (no cascade failures) ──
@@ -512,6 +571,36 @@ export async function GET() {
     `(${Object.values(overallMeta.diagnostics!).filter(d => d.ok).length}/` +
     `${Object.keys(overallMeta.diagnostics!).length} series live)`
   )
+
+  // ── 9. Cache management ──────────────────────────────────────────────────
+  // Only update cache when the key yield series (DGS2 + DGS10) resolved live
+  // so a fully-mock DEMO_FALLBACK response can never evict good cached data.
+  if (overallStatus === 'AUTHENTICATED') {
+    fredCacheWrite(CACHE_KEY, response)
+  } else {
+    // All key fetches failed (429, 504, timeout, etc.) — prefer stale cache
+    // over the static mock so the UI keeps showing real yield curve data.
+    const is429 = [dgs2R, dgs10R].some(
+      r => !r.ok && r.error?.includes('429'),
+    )
+    console.error(
+      '[fred-markets] DEMO_FALLBACK — all key fetches failed.',
+      is429 ? '← FRED rate-limit (429) detected' : '',
+    )
+    if (cached) return serveStaleCache(cached.entry.data, cached.entry.fetchedAt)
+
+    // ── L3: committed seed — real data, always present on any checkout ──────
+    const seed = fredCacheSeedRead<FredMarketsData>(CACHE_KEY)
+    if (seed) {
+      console.warn(
+        `[fred-markets] Using committed seed (age: ${cacheAgeLabel(seed.fetchedAt)}) ` +
+        '— live FRED unavailable and no file cache exists',
+      )
+      return serveStaleCache(seed.data, seed.fetchedAt)
+    }
+
+    console.warn('[fred-markets] No cache or seed available — returning DEMO_FALLBACK')
+  }
 
   return NextResponse.json(response, { status: 200 })
 }

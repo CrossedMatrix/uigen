@@ -7,6 +7,8 @@ interface MarketNodeRowProps {
   node: MarketNode
   showSparkline?: boolean
   compact?: boolean
+  /** Active timeframe — rendered as a muted chip next to the % change in compact mode */
+  timeframe?: '1D' | '5D' | '1M' | '3M'
 }
 
 /**
@@ -17,7 +19,7 @@ interface MarketNodeRowProps {
  * - 🕐 AMBER CLOCK: MARKET_CLOSED_STALE (no update since close)
  * - 🔴 RED WARNING: FEED_DISCONNECTED (API down or very stale)
  */
-export function MarketNodeRow({ node, showSparkline = false, compact = false }: MarketNodeRowProps) {
+export function MarketNodeRow({ node, showSparkline = false, compact = false, timeframe }: MarketNodeRowProps) {
   const {
     displayName,
     price,
@@ -124,7 +126,7 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
         <div className="flex-1">
           <div className="font-mono font-semibold text-slate-100">{displayName}</div>
           <div className={price === null ? 'text-slate-500/60 font-mono' : 'text-slate-400'}>
-            {priceDisplay} {unit}
+            {priceDisplay}{price !== null && unit ? ` ${unit}` : ''}
           </div>
         </div>
 
@@ -137,10 +139,23 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
             {changeDisplay}
           </div>
           <div
-            className="text-[10px]"
+            className="text-[10px] flex items-center justify-end gap-1"
             style={{ color: changePercent === null ? 'rgb(100, 116, 139, 0.6)' : changeColor }}
           >
             {changePctDisplay}
+            {/* Period chip — shown only for non-1D lookbacks */}
+            {timeframe && timeframe !== '1D' && (
+              <span
+                className="text-[8px] font-mono px-0.5 rounded-sm border leading-none"
+                style={{
+                  color:            'rgba(148,163,184,0.55)',
+                  borderColor:      'rgba(148,163,184,0.18)',
+                  backgroundColor:  'rgba(148,163,184,0.06)',
+                }}
+              >
+                {timeframe}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -177,7 +192,7 @@ export function MarketNodeRow({ node, showSparkline = false, compact = false }: 
         <div
           className={`text-[9px] font-mono ${price === null ? 'text-slate-500/60' : 'text-slate-400'}`}
         >
-          {unit}
+          {price !== null ? unit : ''}
         </div>
       </div>
 

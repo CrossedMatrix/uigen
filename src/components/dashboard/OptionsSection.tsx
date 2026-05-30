@@ -1,6 +1,7 @@
 'use client'
 
-import { useId } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
+import { useAlpacaData } from '@/hooks/useAlpacaData'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,60 @@ export interface OIBar {
   strike: number
   callOI: number
   putOI: number
+}
+
+// ─── OI Analytics ─────────────────────────────────────────────────────────────
+
+/**
+ * Call Wall — strike with the highest aggregate call open interest.
+ * Resistance level: dealers must buy underlying as price approaches this strike
+ * (delta hedging), creating a gravitational "ceiling" on near-term price action.
+ */
+export function computeCallWall(bars: OIBar[]): number {
+  if (bars.length === 0) return 0
+  return bars.reduce((best, bar) => (bar.callOI > best.callOI ? bar : best), bars[0]).strike
+}
+
+/**
+ * Put Wall — strike with the highest aggregate put open interest.
+ * Support level: heavy put buying concentrates at this strike, acting as a
+ * price floor because dealers short gamma must sell as price falls through it.
+ */
+export function computePutWall(bars: OIBar[]): number {
+  if (bars.length === 0) return 0
+  return bars.reduce((best, bar) => (bar.putOI > best.putOI ? bar : best), bars[0]).strike
+}
+
+/**
+ * Max Pain — expiration price that minimises total payout to all option holders.
+ * Calculated as: for each candidate strike K, sum the intrinsic value of every
+ * in-the-money call (strike < K) and every in-the-money put (strike > K) using
+ * open interest as the notional weight.  The strike with the smallest total
+ * payout is "max pain" — the price at which option sellers lose the least.
+ *
+ * @param bars — OI bars sorted in any order (function handles internally)
+ */
+export function computeMaxPain(bars: OIBar[]): number {
+  if (bars.length === 0) return 0
+  const strikes = bars.map(b => b.strike).sort((a, b) => a - b)
+  let minPain = Infinity
+  let maxPainStrike = strikes[0]
+
+  for (const k of strikes) {
+    let pain = 0
+    for (const bar of bars) {
+      // In-the-money calls: buyer profits (K - strike) × callOI at price K
+      if (bar.strike < k) pain += (k - bar.strike) * bar.callOI
+      // In-the-money puts: buyer profits (strike - K) × putOI at price K
+      if (bar.strike > k) pain += (bar.strike - k) * bar.putOI
+    }
+    if (pain < minPain) {
+      minPain = pain
+      maxPainStrike = k
+    }
+  }
+
+  return maxPainStrike
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -355,12 +410,22 @@ function OIWallChart({ title, bars, currentPrice, maxPain, callWall, putWall }: 
           const isPutWall  = bar.strike === putWall
 
           return (
-            <div key={bar.strike} className={cn('flex items-center gap-1.5 px-1 py-[2px] rounded text-[10px] font-mono',
-              isCallWall ? 'bg-sky-400/8 border border-sky-400/20' :
-              isMaxPain  ? 'bg-amber-400/10 border border-amber-400/30' :
-              isPutWall  ? 'bg-amber-500/6 border border-amber-500/15' :
-              isCurrent  ? 'bg-slate-700/15 border border-transparent' : 'border border-transparent'
-            )}>
+            <div
+              key={bar.strike}
+              className={cn('relative flex items-center gap-1.5 px-1 py-[2px] rounded text-[10px] font-mono',
+                isCallWall ? 'bg-sky-400/10 border border-sky-400/40' :
+                isMaxPain  ? 'bg-amber-400/10 border border-amber-400/30' :
+                isPutWall  ? 'bg-amber-500/10 border border-amber-500/40' :
+                isCurrent  ? 'bg-slate-700/15 border border-transparent' : 'border border-transparent'
+              )}
+              style={
+                isCallWall
+                  ? { boxShadow: 'inset 3px 0 0 0 #38bdf8, 0 0 6px rgba(56,189,248,0.25)' }
+                  : isPutWall
+                    ? { boxShadow: 'inset 3px 0 0 0 #f59e0b, 0 0 6px rgba(245,158,11,0.25)' }
+                    : undefined
+              }
+            >
               {/* Put bar */}
               <div className="w-28 flex justify-end">
                 <div className="h-3.5 flex items-center justify-end" style={{ width: '100%' }}>
@@ -416,43 +481,117 @@ export interface OIWallsGridProps {
   onAssetsChange?: (assets: string[]) => void
 }
 
+// ─── ETF → Index price scaling ────────────────────────────────────────────────
+// Alpaca serves SPY/QQQ/DIA/IWM via the us_equity endpoint (free, IEX feed).
+// We scale the ETF price to an approximate index level so the "current price"
+// marker in OI charts aligns with the strike range displayed.
+//
+// Scaling factors (approximate, updated periodically):
+//   SPX  ≈ SPY  × 10      (SPX ~5800, SPY ~580)
+//   NDX  ≈ QQQ  × 40      (NDX ~20800, QQQ ~520)
+//   DJI  ≈ DIA  × 100     (DJI ~42000, DIA ~420)
+//   RUT  ≈ IWM  × 10      (RUT ~2100, IWM ~210)
+
+const ASSET_ETF_MAP: Record<string, { etf: string; scale: number }> = {
+  SPX: { etf: 'SPY', scale: 10  },
+  NDX: { etf: 'QQQ', scale: 40  },
+  DJI: { etf: 'DIA', scale: 100 },
+  RUT: { etf: 'IWM', scale: 10  },
+}
+
+const INDEX_ETF_SYMBOLS = ['SPY', 'QQQ', 'DIA', 'IWM'] as const
+
 export function OIWallsGrid({ selectedAssets = ['SPX', 'NDX'], onAssetsChange }: OIWallsGridProps) {
+  // Live ETF prices as a proxy for index currentPrice in OI charts.
+  const { quoteMap: etfMap } = useAlpacaData({
+    symbols:      [...INDEX_ETF_SYMBOLS],
+    assetClass:   'us_equity',
+    type:         'snapshot',
+    pollInterval: 300_000,
+  })
+
+  /** Resolve the "current price" for an asset — live ETF-scaled or mock fallback */
+  function getLiveCurrentPrice(asset: string, mockPrice: number): number {
+    const mapping = ASSET_ETF_MAP[asset]
+    if (!mapping) return mockPrice
+    const etfQuote = etfMap.get(mapping.etf)
+    if (!etfQuote?.price) return mockPrice
+    return parseFloat((etfQuote.price * mapping.scale).toFixed(0))
+  }
+
   const getOIDataForAsset = (asset: string) => {
-    // Return mock data for indices
+    // ── Standard index assets — use real OI bar data with computed analytics ──
     if (asset === 'SPX') {
-      return { bars: SPX_WALLS, currentPrice: INDEX_SKEW_MOCK[0].currentPrice, maxPain: INDEX_SKEW_MOCK[0].maxPain, callWall: INDEX_SKEW_MOCK[0].callWall, putWall: INDEX_SKEW_MOCK[0].putWall }
+      const bars        = SPX_WALLS
+      const currentPrice = getLiveCurrentPrice('SPX', INDEX_SKEW_MOCK[0].currentPrice)
+      return {
+        bars,
+        currentPrice,
+        callWall: computeCallWall(bars),
+        putWall:  computePutWall(bars),
+        maxPain:  computeMaxPain(bars),
+      }
     }
     if (asset === 'NDX') {
-      return { bars: NDX_WALLS, currentPrice: INDEX_SKEW_MOCK[1].currentPrice, maxPain: INDEX_SKEW_MOCK[1].maxPain, callWall: INDEX_SKEW_MOCK[1].callWall, putWall: INDEX_SKEW_MOCK[1].putWall }
+      const bars        = NDX_WALLS
+      const currentPrice = getLiveCurrentPrice('NDX', INDEX_SKEW_MOCK[1].currentPrice)
+      return {
+        bars,
+        currentPrice,
+        callWall: computeCallWall(bars),
+        putWall:  computePutWall(bars),
+        maxPain:  computeMaxPain(bars),
+      }
     }
     if (asset === 'DJI') {
-      return { bars: NDX_WALLS, currentPrice: INDEX_SKEW_MOCK[2].currentPrice, maxPain: INDEX_SKEW_MOCK[2].maxPain, callWall: INDEX_SKEW_MOCK[2].callWall, putWall: INDEX_SKEW_MOCK[2].putWall }
+      const bars        = NDX_WALLS
+      const currentPrice = getLiveCurrentPrice('DJI', INDEX_SKEW_MOCK[2].currentPrice)
+      return {
+        bars,
+        currentPrice,
+        callWall: computeCallWall(bars),
+        putWall:  computePutWall(bars),
+        maxPain:  computeMaxPain(bars),
+      }
     }
     if (asset === 'RUT') {
-      return { bars: SPX_WALLS, currentPrice: INDEX_SKEW_MOCK[3].currentPrice, maxPain: INDEX_SKEW_MOCK[3].maxPain, callWall: INDEX_SKEW_MOCK[3].callWall, putWall: INDEX_SKEW_MOCK[3].putWall }
+      const bars        = SPX_WALLS
+      const currentPrice = getLiveCurrentPrice('RUT', INDEX_SKEW_MOCK[3].currentPrice)
+      return {
+        bars,
+        currentPrice,
+        callWall: computeCallWall(bars),
+        putWall:  computePutWall(bars),
+        maxPain:  computeMaxPain(bars),
+      }
     }
 
-    // Generate mock data for custom stocks
-    const charCode = asset.charCodeAt(0)
+    // ── Custom stock ticker — generate seeded mock bars + live ETF price ──────
+    const charCode  = asset.charCodeAt(0)
     const mockPrice = 50 + (charCode % 200)
+
+    // Use Alpaca live quote if we happen to have it (the quoteMap may include
+    // custom tickers if TechSkewPanel has fetched them separately)
+    const livePrice = etfMap.get(asset)?.price ?? mockPrice
+
     const mockBars: OIBar[] = [
-      { strike: mockPrice - 20, callOI: 5, putOI: 45 },
+      { strike: mockPrice - 20, callOI: 5,  putOI: 45 },
       { strike: mockPrice - 15, callOI: 12, putOI: 38 },
       { strike: mockPrice - 10, callOI: 22, putOI: 65 },
-      { strike: mockPrice - 5, callOI: 35, putOI: 75 },
-      { strike: mockPrice, callOI: 48, putOI: 52 },
-      { strike: mockPrice + 5, callOI: 65, putOI: 28 },
+      { strike: mockPrice - 5,  callOI: 35, putOI: 75 },
+      { strike: mockPrice,      callOI: 48, putOI: 52 },
+      { strike: mockPrice + 5,  callOI: 65, putOI: 28 },
       { strike: mockPrice + 10, callOI: 85, putOI: 15 },
-      { strike: mockPrice + 15, callOI: 45, putOI: 8 },
-      { strike: mockPrice + 20, callOI: 25, putOI: 3 },
+      { strike: mockPrice + 15, callOI: 45, putOI: 8  },
+      { strike: mockPrice + 20, callOI: 25, putOI: 3  },
     ]
 
     return {
-      bars: mockBars,
-      currentPrice: mockPrice,
-      maxPain: mockPrice + 2,
-      callWall: mockPrice + 10,
-      putWall: mockPrice - 10
+      bars:         mockBars,
+      currentPrice: livePrice,
+      callWall:     computeCallWall(mockBars),
+      putWall:      computePutWall(mockBars),
+      maxPain:      computeMaxPain(mockBars),
     }
   }
 
@@ -636,6 +775,257 @@ const NDX_WALLS: OIBar[] = [
   { strike: 22000, callOI: 42,  putOI: 3  }, { strike: 22500, callOI: 25,  putOI: 1  },
 ]
 
+// ─── Dynamic Options Skew Panel ───────────────────────────────────────────────
+//
+// Replaces the hardcoded high-beta-tech tickers with a user-driven input.
+// Default state: NVDA so the panel never renders empty on first load.
+//
+// Flow:
+//   1. User types ticker → presses Enter or "Load Ticker" button.
+//   2. Hits /api/market/options-skew?ticker=XYZ which calls Alpaca's
+//      /v1beta1/options/snapshots/{ticker} and computes:
+//        • ATM IV (avg of 50Δ call + 50Δ put)
+//        • 25Δ put / 25Δ call skew curve
+//        • Delta-skew %  (25Δ put IV − 25Δ call IV)
+//        • Call Wall / Put Wall / Max Pain on the front-week chain
+//   3. UI renders the same SkewCurveSVG + OIWallChart visual stack used by
+//      the index panels — single source of truth for styling.
+//   4. Errors surface as "No active options chain found for [Ticker]"
+//      instead of crashing the dashboard.
+
+export interface OptionsSkewApiResponse {
+  ticker: string
+  spot: number | null
+  expiry: string
+  atmIV: number
+  skewPct: number
+  callWall: number
+  putWall: number
+  maxPain: number
+  curve: SkewPoint[]
+  openInterestData: OIBar[]
+  contractCount: number
+  /** 30d annualised realised vol of the underlying — 0..1 fraction */
+  hv30: number | null
+  /** atmIV / hv30 — > 1 means IV richer than realised */
+  vrpRatio: number | null
+  /** CHEAP / FAIR / RICH / UNKNOWN — drives the Volatility Premium badge */
+  vrpLabel: 'CHEAP' | 'FAIR' | 'RICH' | 'UNKNOWN'
+  source: string
+  timestamp: number
+}
+
+// ─── Volatility Premium Badge ─────────────────────────────────────────────────
+// IV (implied) vs HV (realised, 30d) tells us whether the front-week chain
+// is overpaying for vol (RICH → sell premium) or underpricing it
+// (CHEAP → buy premium).
+function VolPremiumBadge({ data }: { data: OptionsSkewApiResponse }) {
+  const ivPct = (data.atmIV * 100).toFixed(1)
+  const hvPct = data.hv30 != null ? (data.hv30 * 100).toFixed(1) : null
+  const ratio = data.vrpRatio
+  const tone =
+    data.vrpLabel === 'RICH'  ? { color: '#f87171', bg: 'bg-red-400/10',     border: 'border-red-400/30',     glyph: '↑' } :
+    data.vrpLabel === 'CHEAP' ? { color: '#34d399', bg: 'bg-emerald-400/10', border: 'border-emerald-400/30', glyph: '↓' } :
+    data.vrpLabel === 'FAIR'  ? { color: '#fbbf24', bg: 'bg-amber-400/10',   border: 'border-amber-400/30',   glyph: '≈' } :
+                                { color: '#94a3b8', bg: 'bg-slate-700/30',   border: 'border-slate-500/40',   glyph: '?' }
+  const pricing =
+    data.vrpLabel === 'RICH'  ? 'Options pricing: RICH [IV > HV]'  :
+    data.vrpLabel === 'CHEAP' ? 'Options pricing: CHEAP [IV < HV]' :
+    data.vrpLabel === 'FAIR'  ? 'Options pricing: FAIR [IV ≈ HV]'  :
+                                'Options pricing: UNKNOWN'
+
+  return (
+    <div
+      className={cn(
+        'inline-flex flex-col items-start gap-0.5 px-2.5 py-1.5 rounded border font-mono',
+        tone.bg, tone.border,
+      )}
+      title={`ATM IV ${ivPct}% vs HV30 ${hvPct ?? '—'}% → ratio ${ratio ?? '—'}`}
+    >
+      <span
+        className="text-[12px] font-bold tracking-wider uppercase"
+        style={{ color: tone.color }}
+      >
+        {tone.glyph} {pricing}
+      </span>
+      <span className="text-[10px] text-slate-400">
+        IV {ivPct}% · HV30 {hvPct ?? '—'}%
+        {ratio != null && (
+          <span style={{ color: tone.color }}> · {ratio.toFixed(2)}×</span>
+        )}
+      </span>
+    </div>
+  )
+}
+
+export function DynamicOptionsSkewPanel({ defaultTicker = 'NVDA' }: { defaultTicker?: string }) {
+  const [inputValue, setInputValue]   = useState(defaultTicker)
+  const [activeTicker, setActiveTicker] = useState(defaultTicker)
+  const [data, setData]               = useState<OptionsSkewApiResponse | null>(null)
+  const [error, setError]             = useState<string | null>(null)
+  const [loading, setLoading]         = useState(false)
+
+  const loadTicker = useCallback(async (ticker: string) => {
+    const symbol = ticker.trim().toUpperCase()
+    if (!symbol) return
+    setActiveTicker(symbol)
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/market/options-skew?ticker=${encodeURIComponent(symbol)}`, {
+        cache: 'no-store',
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        // Backend returns `{ error: "No active options chain found for XYZ" }` on 404.
+        setData(null)
+        setError(body?.error ?? `No active options chain found for ${symbol}`)
+        return
+      }
+      setData(body as OptionsSkewApiResponse)
+    } catch (e) {
+      setData(null)
+      setError(`No active options chain found for ${symbol}`)
+      console.warn('[DynamicOptionsSkewPanel] fetch failed:', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // Initial load — fetch default ticker exactly once on mount.
+  useEffect(() => {
+    loadTicker(defaultTicker)
+  }, [defaultTicker, loadTicker])
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    loadTicker(inputValue)
+  }
+
+  const livePrice = data?.spot ?? null
+  const skewSignal: IndexSkewData['signal'] =
+    data == null ? 'neutral' :
+    data.skewPct > 8  ? 'heavy_skew' :
+    data.skewPct > 3  ? 'elevated'   :
+    data.skewPct < -2 ? 'complacent' : 'neutral'
+
+  const cardData: IndexSkewData | null = data && {
+    symbol:       data.ticker,
+    name:         `${data.ticker} · Front-week ${data.expiry}`,
+    shortName:    data.ticker,
+    currentPrice: livePrice ?? 0,
+    atmIV:        data.atmIV * 100,
+    ivRank:       Math.min(100, Math.max(0, Math.round(data.atmIV * 100 * 1.5))),
+    skewSlope:    data.skewPct,
+    impMove1W:    parseFloat((data.atmIV * 100 / Math.sqrt(52)).toFixed(2)),
+    impMove1M:    parseFloat((data.atmIV * 100 / Math.sqrt(12)).toFixed(2)),
+    curve:        data.curve,
+    callWall:     data.callWall,
+    putWall:      data.putWall,
+    maxPain:      data.maxPain,
+    signal:       skewSignal,
+  }
+
+  return (
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-xl p-3 space-y-3">
+      {/* ── Header + input ────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">
+            Options Skew &amp; Sentiment
+          </h3>
+          <p className="text-[12px] text-slate-400 font-mono">
+            Live Alpaca chain · dynamic ticker
+          </p>
+        </div>
+
+        <form onSubmit={onSubmit} className="flex items-center gap-1.5 shrink-0">
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value.toUpperCase().slice(0, 6))}
+            placeholder="Enter ticker"
+            spellCheck={false}
+            autoCapitalize="characters"
+            className="w-28 px-2 py-1 rounded border border-[#1a2540] bg-[#070b14] text-slate-100 text-xs font-mono uppercase tracking-wider focus:outline-none focus:border-sky-500/60 transition-colors"
+          />
+          <button
+            type="submit"
+            disabled={loading || !inputValue.trim()}
+            className={cn(
+              'px-2 py-1 rounded border text-[12px] font-mono uppercase tracking-wider transition-colors',
+              loading
+                ? 'border-slate-700 bg-slate-800/40 text-slate-500 cursor-wait'
+                : 'border-sky-700 bg-sky-700/15 text-sky-300 hover:bg-sky-700/25 cursor-pointer',
+            )}
+          >
+            {loading ? 'Loading…' : 'Load Ticker'}
+          </button>
+        </form>
+      </div>
+
+      {/* ── Body ──────────────────────────────────────────────────────────── */}
+      {error && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/8 p-3 text-center">
+          <div className="text-amber-300 text-[12px] font-mono">{error}</div>
+          <div className="text-slate-500 text-[12px] font-mono mt-1">
+            Try a liquid optionable ticker (e.g. NVDA, TSLA, AMD, AAPL, SPY).
+          </div>
+        </div>
+      )}
+
+      {!error && !data && loading && (
+        <div className="rounded-lg border border-[#1a2540] bg-[#070b14] p-3 text-center">
+          <div className="text-slate-400 text-[12px] font-mono animate-pulse">
+            Fetching {activeTicker} chain…
+          </div>
+        </div>
+      )}
+
+      {!error && cardData && (
+        <>
+          {/* ── Volatility-Risk-Premium strip — sits ABOVE the walls so the
+              CHEAP / RICH context frames the strike data the user is about
+              to read.  Renders inline with the call/put wall summary. ── */}
+          <div className="flex flex-wrap items-center gap-2 px-1">
+            <VolPremiumBadge data={data!} />
+            <div className="text-[10px] font-mono text-slate-500">
+              vs walls →
+              <span className="text-sky-400 ml-1.5">CW {fmtStrike(cardData.callWall)}</span>
+              <span className="text-amber-400 mx-1.5">MP {fmtStrike(cardData.maxPain)}</span>
+              <span className="text-amber-500">PW {fmtStrike(cardData.putWall)}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <IndexSkewCard data={cardData} />
+            <OIWallChart
+              title={cardData.shortName}
+              bars={data!.openInterestData}
+              currentPrice={cardData.currentPrice}
+              callWall={cardData.callWall}
+              putWall={cardData.putWall}
+              maxPain={cardData.maxPain}
+            />
+          </div>
+        </>
+      )}
+
+      {data && (
+        <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 px-1">
+          <span>
+            {data.contractCount} contracts · spot $
+            {livePrice != null ? livePrice.toFixed(2) : '--'}
+          </span>
+          <span>
+            ATM IV {(data.atmIV * 100).toFixed(1)}% · Δ-skew {data.skewPct >= 0 ? '+' : ''}{data.skewPct}pp
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Public Props / Main Export ───────────────────────────────────────────────
 
 export interface OptionsSectionProps {
@@ -647,6 +1037,7 @@ export function OptionsSection({ skewData = INDEX_SKEW_MOCK }: OptionsSectionPro
     <section className="space-y-3">
       <ExpirationCalendarBanner />
       <IndexSkewGrid skewData={skewData} />
+      <DynamicOptionsSkewPanel defaultTicker="NVDA" />
       <OIWallsGrid />
     </section>
   )

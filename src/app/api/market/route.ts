@@ -1,134 +1,176 @@
 import { NextResponse } from 'next/server'
+import { fetchIBKRSnapshotQuotes, type IBKRSnapshotQuote } from '@/lib/services/ibkrFetcher'
+import { fetchFMPQuotes, type FMPQuote } from '@/lib/services/fmpFetcher'
+import {
+  calculateMacroSignals,
+  type YieldCurveSignal,
+  type YieldObservation,
+} from '@/lib/market/macroSignals'
+import { getMacroSignal, type MacroSignal } from '@/lib/macro-engine'
 
 // ─── Market Data API Route ────────────────────────────────────────────────────
-// Fetches live financial market data from Yahoo Finance and generates deterministic
-// mock sparklines. Optimized for dashboard performance with no fundamental data.
+// Assembles the main dashboard market payload: futures, equities, rates, FX,
+// commodities, volatility indices, and cross-asset ratios.
+//
+// Data providers:
+//   Alpaca Markets — crypto (BTC/USD), US equity ETFs (GLD, SLV, USO, BNO,
+//                    CPER, UNG, …) — **all commodity exposure**
+//   FMP            — vol indices (^VIX, ^VVIX, ^SKEW), spot indices (^GSPC…),
+//                    rates (^TNX…)
+// NB: FMP commodity-spot symbols (GCUSD/XAGUSD/CLUSD) were decommissioned
+//     to stop their daily quota from triggering 429 rate-limit blocks.  The
+//     commodity ETF tickers above carry all our commodity pricing now.
 
 const SYMBOL_NAMES: Record<string, string> = {
-  // ──────────────────────────────────────────────────────────────────
-  // INDEX FUTURES (Primary trackers)
-  // ──────────────────────────────────────────────────────────────────
-  'ES=F':  'S&P E-Mini',
-  'NQ=F':  'Nasdaq 100 E-Mini',
-  'YM=F':  'DOW E-Mini',
-  'RTY=F': 'Russell 2000 E-Mini',
-
-  // ──────────────────────────────────────────────────────────────────
-  // SPOT INDICES (for yield curve, cross-asset ratios)
-  // ──────────────────────────────────────────────────────────────────
+  // INDEX ETF PROXIES — replaces legacy /ES /NQ /YM /RTY futures symbols.
+  // Alpaca serves these as us_equity snapshots (IEX feed, free tier).
+  // Names mirror ETF_DISPLAY_NAMES in dashboard/page.tsx for consistent labels.
+  'SPY': 'S&P 500',
+  'QQQ': 'Nasdaq 100',
+  'DIA': 'Dow Jones',
+  'IWM': 'Russell 2000',
+  // SPOT INDICES
   '^GSPC': 'S&P 500 Cash',
   '^NDX':  'Nasdaq 100 Cash',
   '^DJI':  'Dow Jones Cash',
   '^RUT':  'Russell 2000 Cash',
-
-  // ──────────────────────────────────────────────────────────────────
-  // VOLATILITY INDICES (Core framework)
-  // ──────────────────────────────────────────────────────────────────
+  // VOLATILITY
   '^VIX':  'VIX (Equity Vol)',
   '^VVIX': 'Vol of Vol',
   '^SKEW': 'CBOE Skew',
   '^MOVE': 'Bond Vol Index',
-
-  // ──────────────────────────────────────────────────────────────────
-  // INTEREST RATES & YIELD CURVE
-  // ──────────────────────────────────────────────────────────────────
+  // RATES
   '^IRX':  '3-Month Treasury',
   '^FVX':  '5-Year Treasury',
   '^TNX':  '10-Year Treasury',
   '^TYX':  '30-Year Treasury',
-
-  // ──────────────────────────────────────────────────────────────────
-  // CURRENCIES & FX (Cross-asset framework)
-  // ──────────────────────────────────────────────────────────────────
+  // FX / CRYPTO
   'DX-Y.NYB': 'US Dollar Index',
   'EURUSD=X': 'EUR/USD',
   'GBPUSD=X': 'GBP/USD',
   'JPY=X':    'USD/JPY',
   'CNY=X':    'USD/CNY',
   'AUDUSD=X': 'AUD/USD',
-  'BTC-USD':  'Bitcoin',
-
-  // ──────────────────────────────────────────────────────────────────
-  // COMMODITIES (Physical assets framework)
-  // ──────────────────────────────────────────────────────────────────
-  'GC=F':  'Gold',
-  'SI=F':  'Silver',
-  'CL=F':  'WTI Crude Oil',
-  'BZ=F':  'Brent Crude Oil',
-  'HG=F':  'Copper',
-  'NG=F':  'Natural Gas',
-
-  // ──────────────────────────────────────────────────────────────────
-  // SECTOR TRACKERS & ETFs
-  // ──────────────────────────────────────────────────────────────────
+  'BTC/USD':  'Bitcoin',
+  // COMMODITY ETFs (Alpaca us_equity — GLD/SLV/USO/BNO/CPER/UNG)
+  'GLD':  'Gold (GLD)',
+  'SLV':  'Silver (SLV)',
+  'USO':  'WTI Oil (USO)',
+  'BNO':  'Brent Oil (BNO)',
+  'CPER': 'Copper (CPER)',
+  'UNG':  'NatGas (UNG)',
+  // SECTOR ETFs
   'SOXX': 'Semiconductor ETF',
   'EWY':  'Korea ETF',
+  // (FMP commodity-spot entries removed — see route header.  Commodity
+  // ratios now resolve exclusively against the Alpaca ETF proxies above.)
 }
 
-interface YahooQuote {
-  symbol: string
-  regularMarketPrice: number
-  regularMarketChange: number
-  regularMarketChangePercent: number
-  regularMarketDayHigh: number
-  regularMarketDayLow: number
+// ─── Provider Quote (provider-agnostic shape used inside this route) ──────────
+
+interface ProviderQuote {
+  symbol:                string
+  price:                 number
+  change:                number
+  changePercent:         number
+  high?:                 number
+  low?:                  number
 }
 
-const YF_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'application/json,text/plain,*/*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://finance.yahoo.com/',
-  'Origin': 'https://finance.yahoo.com',
-}
+// ─── FMP → ProviderQuote adapter ──────────────────────────────────────────────
 
-async function fetchYahooQuotes(symbols: string[]): Promise<YahooQuote[]> {
-  const joined = symbols.map(encodeURIComponent).join(',')
-  // Try query2 first (often less rate-limited), fall back to query1
-  for (const host of ['query2', 'query1']) {
-    try {
-      const url = `https://${host}.finance.yahoo.com/v7/finance/quote?symbols=${joined}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow`
-      const res = await fetch(url, { headers: YF_HEADERS, cache: 'no-store' })
-      if (!res.ok) continue
-      const json = await res.json()
-      const results = (json.quoteResponse?.result ?? []) as YahooQuote[]
-      if (results.length > 0) return results
-    } catch {
-      // try next host
-    }
+function fmpToProvider(q: FMPQuote): ProviderQuote {
+  return {
+    symbol:        q.symbol,
+    price:         q.price,
+    change:        q.change,
+    changePercent: q.changesPercentage,   // FMP uses %, matches our schema
+    high:          q.dayHigh || undefined,
+    low:           q.dayLow  || undefined,
   }
-  // Graceful fallback: warn instead of throwing, let GET handler use mock data
-  console.warn('[market-api] Yahoo Finance endpoints down, serving stable fallback matrix.')
-  return []
 }
 
-async function fetchSparklines(symbols: string[], interval = '1h', range = '5d'): Promise<Record<string, number[]>> {
-  const settled = await Promise.allSettled(
-    symbols.map(async (symbol) => {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`
-      const res = await fetch(url, {
-        headers: YF_HEADERS,
-        cache: 'no-store' as RequestCache,
-      })
-      if (!res.ok) return { symbol, data: [] as number[] }
-      const json = await res.json()
-      const closes: (number | null)[] = json.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? []
-      const filtered = closes.filter((v): v is number => v !== null)
-      // For 1D (intraday) return last 78 bars (≈ full trading day of 15-min bars)
-      // For 5D hourly return last 24 bars
-      const limit = interval === '15m' ? 78 : 24
-      return { symbol, data: filtered.slice(-limit) }
-    })
+// ─── FMP symbol set — anything Alpaca cannot serve ────────────────────────────
+// Vol indices: ^VIX, ^VVIX, ^SKEW (Alpaca rejects ^ prefix)
+// Spot indices: ^GSPC, ^NDX, ^DJI, ^RUT
+// Rates       : ^IRX, ^FVX, ^TNX, ^TYX (FMP maps these correctly)
+//
+// ── Commodity spot (GCUSD / XAGUSD / CLUSD) was REMOVED in Nov 2026 ──
+//   Every market-page render fired three commodity-spot calls into FMP,
+//   eating the daily 250-call quota in well under an hour and producing
+//   cascade 429 errors that blanked the whole dashboard.
+//   We now lean entirely on the Alpaca commodity-ETF feed (GLD / SLV /
+//   USO / BNO / CPER / UNG) — same trading-cost-of-carry exposure, no
+//   third-party quota.
+
+const FMP_SYMBOLS = [
+  // Vol surface
+  '^VIX', '^VVIX', '^SKEW',
+  // Put/Call Equity Ratio (CBOE, updates post-close daily)
+  '^PCCE',
+  // Spot indices
+  '^GSPC', '^NDX', '^DJI', '^RUT',
+  // Rates
+  '^IRX', '^FVX', '^TNX', '^TYX',
+  // (commodity spot symbols intentionally absent — see header note above)
+] as const
+
+// ─── Alpaca Data Fetcher ──────────────────────────────────────────────────────
+// Calls the /api/alpaca proxy (credentials stay server-side).
+// Alpaca supports: crypto (BTC/USD, ETH/USD) and US equities (SPY, QQQ, etc.)
+// Not supported: index futures (ES=F), VIX/MOVE/SKEW, FX rates, Treasury rates.
+
+const ALPACA_PROXY_BASE = process.env.NEXT_PUBLIC_BASE_URL
+  ? `${process.env.NEXT_PUBLIC_BASE_URL}/api/alpaca`
+  : 'http://localhost:3000/api/alpaca'
+
+async function fetchQuotes(symbols: string[]): Promise<ProviderQuote[]> {
+  if (symbols.length === 0) return []
+
+  // Crypto: slash-format only (e.g. BTC/USD, ETH/USD)
+  const cryptoSymbols  = symbols.filter(s => s.includes('/'))
+
+  // Equity: plain uppercase tickers that Alpaca's us_equity endpoint accepts.
+  // Explicitly exclude:
+  //   ^  — cash indices (^VIX, ^GSPC)  — not available on Alpaca
+  //   =F — futures (ES=F, GC=F)         — not available on Alpaca
+  //   =X — FX pairs (EURUSD=X, JPY=X)  — not available on Alpaca
+  //   .  — dotted suffixes (.NYB, .NYQ) — not available on Alpaca
+  //   -  — Yahoo-style crypto (BTC-USD) — use slash format instead (BTC/USD)
+  const equitySymbols  = symbols.filter(
+    s => !s.includes('/') &&
+         !s.startsWith('^') &&
+         !s.includes('=') &&    // catches =F, =X, any other = variants
+         !s.includes('.') &&    // catches .NYB, .NYQ
+         !s.includes('-')       // catches BTC-USD, ETH-USD (Yahoo-format crypto)
   )
-  return Object.fromEntries(
-    settled
-      .filter((r): r is PromiseFulfilledResult<{ symbol: string; data: number[] }> => r.status === 'fulfilled')
-      .map((r) => [r.value.symbol, r.value.data])
-  )
+
+  const results: ProviderQuote[] = []
+
+  const fetchGroup = async (syms: string[], assetClass: string) => {
+    if (syms.length === 0) return
+    try {
+      const url = `${ALPACA_PROXY_BASE}?type=snapshot&symbols=${encodeURIComponent(syms.join(','))}&asset_class=${assetClass}`
+      const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
+      if (!res.ok) return
+      const data = await res.json() as { quotes?: ProviderQuote[] }
+      for (const q of data.quotes ?? []) {
+        if (q.price !== null) results.push(q)
+      }
+    } catch { /* provider unavailable */ }
+  }
+
+  await Promise.all([
+    fetchGroup(cryptoSymbols, 'crypto'),
+    fetchGroup(equitySymbols, 'us_equity'),
+  ])
+
+  return results
 }
 
-// Seeded LCG sparkline generator for deterministic mock data
+// ─── Sparkline Generators ─────────────────────────────────────────────────────
+
+// Seeded LCG for deterministic synthetic sparklines (shape only — not prices).
 function seededSparkline(start: number, end: number, n: number, seed: number): number[] {
   let s = seed
   const rand = () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff }
@@ -141,214 +183,411 @@ function seededSparkline(start: number, end: number, n: number, seed: number): n
   return pts
 }
 
-// Generate multi-timeframe seeded sparklines for a symbol
 function multiTFSparklines(symbol: string, price: number, change: number) {
   const start = price - change
-  const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  const seed  = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
   return {
-    '1D': seededSparkline(start, price, 78, seed + 1),      // ~6.5h of 5min bars
+    '1D': seededSparkline(start, price, 78, seed + 1),
     '5D': seededSparkline(start * 0.98, price, 24, seed + 2),
     '1M': seededSparkline(price * 0.95, price, 22, seed + 3),
     '3M': seededSparkline(price * 0.88, price, 65, seed + 4),
   }
 }
 
-function getMockData(isMarketOpen: boolean) {
-  const futuresMock = [
-    { symbol: 'ES=F',  name: 'S&P E-Mini',    price: 5823.25, change: 28.50,  changePercent: 0.49, high: 5852.00, low: 5790.00 },
-    { symbol: 'NQ=F',  name: 'NQ E-Mini',     price: 20724.00, change: 268.75, changePercent: 1.31, high: 20840.00, low: 20428.00 },
-    { symbol: 'YM=F',  name: 'DOW E-Mini',    price: 42186.00, change: 120.00, changePercent: 0.28, high: 42304.00, low: 41980.00 },
-    { symbol: 'RTY=F', name: 'Russell Mini',  price: 2096.80, change: 6.50,   changePercent: 0.31, high: 2110.00, low: 2087.00 },
-  ]
+// ─── Unavailable-data skeleton ────────────────────────────────────────────────
+
+function getUnavailableData(isMarketOpen: boolean) {
+  const nullInstrument = (symbol: string, name: string) => ({
+    symbol, name,
+    price: null, change: null, changePercent: null,
+    sparkline: [], sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] },
+  })
 
   return {
-    futures: futuresMock.map((f) => ({
-      ...f,
-      sparklines: multiTFSparklines(f.symbol, f.price, f.change),
-    })),
+    futures: [
+      { ...nullInstrument('SPY', 'S&P 500'),     sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('QQQ', 'Nasdaq 100'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('DIA', 'Dow Jones'),   sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('IWM', 'Russell 2000'),sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+    ],
     equities: [
-      { symbol: '^GSPC', name: 'S&P 500',      price: 5823.25, change: 28.50,  changePercent: 0.49,  high: 5858.04, low: 5789.14, sparkline: seededSparkline(5790, 5823, 24, 1) },
-      { symbol: '^NDX',  name: 'NASDAQ 100',   price: 20724.00, change: 268.75, changePercent: 1.31, high: 20881.32, low: 20455.23, sparkline: seededSparkline(20455, 20724, 24, 2) },
-      { symbol: '^DJI',  name: 'DOW JONES',    price: 42186.00, change: 120.00, changePercent: 0.28, high: 42380.11, low: 42005.87, sparkline: seededSparkline(42005, 42186, 24, 3) },
-      { symbol: '^RUT',  name: 'RUSSELL 2000', price: 2096.80,  change: 6.50,   changePercent: 0.31, high: 2114.28,  low: 2090.12,  sparkline: seededSparkline(2090, 2096, 24, 4) },
+      nullInstrument('^GSPC', 'S&P 500'),
+      nullInstrument('^NDX',  'NASDAQ 100'),
+      nullInstrument('^DJI',  'DOW JONES'),
+      nullInstrument('^RUT',  'RUSSELL 2000'),
     ],
     rates: [
-      { symbol: '^IRX', name: '3-Month', price: 5.24, change: -0.02, changePercent: -0.38, high: 5.26, low: 5.22, sparkline: [] },
-      { symbol: '^FVX', name: '5-Year',  price: 4.52, change:  0.01, changePercent:  0.22, high: 4.55, low: 4.49, sparkline: [] },
-      { symbol: '^TNX', name: '10-Year', price: 4.41, change:  0.03, changePercent:  0.68, high: 4.44, low: 4.36, sparkline: [] },
-      { symbol: '^TYX', name: '30-Year', price: 4.68, change:  0.05, changePercent:  1.08, high: 4.70, low: 4.61, sparkline: [] },
+      nullInstrument('^IRX', '3-Month'),
+      nullInstrument('^FVX', '5-Year'),
+      nullInstrument('^TNX', '10-Year'),
+      nullInstrument('^TYX', '30-Year'),
     ],
     fx: [
-      { symbol: 'DX-Y.NYB', name: 'DXY',     price: 99.84,  change: -0.42, changePercent: -0.42, sparklines: multiTFSparklines('DXY', 99.84, -0.42)     },
-      { symbol: 'EURUSD=X',  name: 'EUR/USD', price:  1.1348, change:  0.0048, changePercent:  0.42, sparklines: multiTFSparklines('EURUSD', 1.1348, 0.0048) },
-      { symbol: 'GBPUSD=X',  name: 'GBP/USD', price:  1.3412, change:  0.0028, changePercent:  0.21, sparklines: multiTFSparklines('GBPUSD', 1.3412, 0.0028) },
-      { symbol: 'JPY=X',     name: 'USD/JPY', price: 143.28,  change: -0.48, changePercent: -0.33, sparklines: multiTFSparklines('USDJPY', 143.28, -0.48)  },
-      { symbol: 'CNY=X',     name: 'USD/CNY', price:  7.1842, change:  0.0038, changePercent:  0.05, sparklines: multiTFSparklines('USDCNY', 7.1842, 0.0038) },
-      { symbol: 'AUDUSD=X',  name: 'AUD/USD', price:  0.6482, change:  0.0024, changePercent:  0.37, sparklines: multiTFSparklines('AUDUSD', 0.6482, 0.0024) },
-      { symbol: 'BTC-USD',   name: 'BTC/USD', price: 107480,  change:  1248, changePercent:   1.17, sparklines: multiTFSparklines('BTC', 107480, 1248)      },
+      { ...nullInstrument('DX-Y.NYB', 'DXY'),     sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('EURUSD=X', 'EUR/USD'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('GBPUSD=X', 'GBP/USD'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('JPY=X',    'USD/JPY'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('CNY=X',    'USD/CNY'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('AUDUSD=X', 'AUD/USD'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('BTC/USD',  'Bitcoin'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
     ],
     commodities: [
-      { symbol: 'GC=F', name: 'Gold',        price: 3291.80, change:  -9.40, changePercent: -0.28, sparklines: multiTFSparklines('GC', 3291.80, -9.40) },
-      { symbol: 'SI=F', name: 'Silver',       price:   32.84, change:  -0.28, changePercent: -0.84, sparklines: multiTFSparklines('SI', 32.84, -0.28)   },
-      { symbol: 'CL=F', name: 'WTI Crude',   price:   61.53, change:  -0.36, changePercent: -0.58, sparklines: multiTFSparklines('CL', 61.53, -0.36)   },
-      { symbol: 'BZ=F', name: 'Brent Crude', price:   64.78, change:  -0.41, changePercent: -0.63, sparklines: multiTFSparklines('BZ', 64.78, -0.41)   },
-      { symbol: 'HG=F', name: 'Copper',      price:    4.74, change:   0.06, changePercent:  1.28, sparklines: multiTFSparklines('HG', 4.74, 0.06)     },
-      { symbol: 'NG=F', name: 'Natural Gas', price:    3.58, change:  -0.08, changePercent: -2.19, sparklines: multiTFSparklines('NG', 3.58, -0.08)    },
+      { ...nullInstrument('GLD',  'Gold (GLD)'),     sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('SLV',  'Silver (SLV)'),   sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('USO',  'WTI Oil (USO)'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('BNO',  'Brent (BNO)'),    sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('CPER', 'Copper (CPER)'),  sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
+      { ...nullInstrument('UNG',  'NatGas (UNG)'),   sparklines: { '1D': [], '5D': [], '1M': [], '3M': [] } },
     ],
     volatility: {
-      vix:         { symbol: '^VIX',  name: 'VIX',       price: 17.82, change: -0.84, changePercent: -4.50, sparkline: [] },
-      vvix:        { symbol: '^VVIX', name: 'VVIX',      price:  92.4, change: -2.1,  changePercent: -2.22, sparkline: [] },
-      skew:        { symbol: '^SKEW', name: 'CBOE SKEW', price: 131.2, change:  1.4,  changePercent:  1.08, sparkline: [] },
+      vix:          { symbol: '^VIX',  name: 'VIX',       price: null, change: null, changePercent: null, sparkline: [] },
+      vvix:         { symbol: '^VVIX', name: 'VVIX',      price: null, change: null, changePercent: null, sparkline: [] },
+      skew:         { symbol: '^SKEW', name: 'CBOE SKEW', price: null, change: null, changePercent: null, sparkline: [] },
       putCallRatio: 0.72,
     },
     ratios: {
-      copperGoldRatio: 4.74 / 3291.80,      // ~0.00144
-      goldSilverRatio: 3291.80 / 32.84,     // ~100.2
-      vixVvixRatio: 17.82 / 92.4,           // ~0.193
-      btcGoldRatio: 107480 / 3291.80,       // ~32.64
-      oilGoldRatio: 61.53 / 3291.80,        // ~0.0187
-      yield2y10y: 4.41 - 4.52,              // -0.11 (inverted)
+      copperGoldRatio: 0,
+      goldSilverRatio: 0,
+      vixVvixRatio:    0,
+      btcGoldRatio:    0,
+      oilGoldRatio:    0,
+      yield2y10y:      0,
     },
     timestamp: Date.now(),
     isMarketOpen,
   }
 }
 
+// ─── Market Hours ─────────────────────────────────────────────────────────────
+
 function isMarketCurrentlyOpen(): boolean {
-  const now = new Date()
-  // Use America/New_York to correctly handle EDT vs EST (DST-aware)
+  const now   = new Date()
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
+    weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
   }).formatToParts(now)
-  const weekday = parts.find(p => p.type === 'weekday')?.value ?? ''
-  const hour    = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10)
-  const minute  = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10)
-  const isWeekday    = !['Sat', 'Sun'].includes(weekday)
-  const minuteOfDay  = hour * 60 + minute
-  return isWeekday && minuteOfDay >= 570 && minuteOfDay < 960  // 9:30 AM – 4:00 PM ET
+  const weekday     = parts.find(p => p.type === 'weekday')?.value ?? ''
+  const hour        = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10)
+  const minute      = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10)
+  const isWeekday   = !['Sat', 'Sun'].includes(weekday)
+  const minuteOfDay = hour * 60 + minute
+  return isWeekday && minuteOfDay >= 570 && minuteOfDay < 960
 }
 
-// ─── Cross-Asset Ratio Utilities ──────────────────────────────────────────
-// Compute live ratio states from fetched quotes for dashboard cross-asset signals
+// ─── Cross-Asset Ratios ────────────────────────────────────────────────────────
 
 interface CrossAssetRatios {
-  copperGoldRatio: number        // HG=F / GC=F: Risk-on/risk-off signal
-  goldSilverRatio: number        // GC=F / SI=F: Safe haven positioning
-  vixVvixRatio: number           // ^VIX / ^VVIX: Volatility term structure
-  btcGoldRatio: number           // BTC-USD / GC=F (normalized): Digital vs physical
-  oilGoldRatio: number           // CL=F / GC=F: Growth vs safety
-  yield2y10y: number             // ^TNX - ^FVX: Curve slope signal
+  copperGoldRatio: number
+  goldSilverRatio: number
+  vixVvixRatio:    number
+  btcGoldRatio:    number
+  oilGoldRatio:    number
+  yield2y10y:      number
 }
 
-function computeRatios(qmap: Map<string, YahooQuote>): CrossAssetRatios {
-  // Extract prices safely with fallback to 0 for missing symbols
-  const copper = qmap.get('HG=F')?.regularMarketPrice ?? 0
-  const gold   = qmap.get('GC=F')?.regularMarketPrice ?? 0
-  const silver = qmap.get('SI=F')?.regularMarketPrice ?? 0
-  const vix    = qmap.get('^VIX')?.regularMarketPrice ?? 0
-  const vvix   = qmap.get('^VVIX')?.regularMarketPrice ?? 0
-  const btc    = qmap.get('BTC-USD')?.regularMarketPrice ?? 0
-  const oil    = qmap.get('CL=F')?.regularMarketPrice ?? 0
-  const tnx    = qmap.get('^TNX')?.regularMarketPrice ?? 0
-  const fvx    = qmap.get('^FVX')?.regularMarketPrice ?? 0
+function computeRatios(qmap: Map<string, ProviderQuote>): CrossAssetRatios {
+  const p = (sym: string) => qmap.get(sym)?.price ?? 0
+
+  // Cross-asset ratios now resolve exclusively against the Alpaca ETF
+  // proxies.  GCUSD / XAGUSD / CLUSD spot symbols were removed from the
+  // FMP basket — see route header.  The ETF prices track underlying spot
+  // closely enough for the relative-value ratios we render.
+  const gold   = p('GLD')
+  const silver = p('SLV')
+  const oil    = p('USO')
+  const copper = p('CPER')
+
+  const vix  = p('^VIX')
+  const vvix = p('^VVIX')
+  const btc  = p('BTC/USD')
+  const tnx  = p('^TNX')
+  const fvx  = p('^FVX')
 
   return {
-    // Cu/Au ratio: >0.15 = risk-on, <0.12 = risk-off (normalized by historical ranges)
-    copperGoldRatio: gold > 0 ? (copper / gold) : 0,
-
-    // Au/Ag ratio: >80 = deflation fears, <60 = normal (classic safe haven metric)
-    goldSilverRatio: silver > 0 ? (gold / silver) : 0,
-
-    // VIX/VVIX: <1.0 = vol term inverted (extreme), >1.0 = normal term structure
-    vixVvixRatio: vvix > 0 ? (vix / vvix) : 0,
-
-    // BTC/Au normalized: Crypto vs physical hard asset (1 oz gold ~$2000, 1 BTC ~$100k)
-    // Raw ratio; dashboard normalizes for comparison
-    btcGoldRatio: gold > 0 ? (btc / gold) : 0,
-
-    // Oil/Gold: >0.05 = growth strength, <0.03 = recession signal
-    oilGoldRatio: gold > 0 ? (oil / gold) : 0,
-
-    // Yield curve slope: positive = normal, negative = inversion (recession signal)
-    // TNX = 10Y, FVX = 5Y; TNX - FVX typically 0-2% in normal markets
-    yield2y10y: tnx - fvx,
+    copperGoldRatio: gold   > 0 ? copper / gold   : 0,
+    goldSilverRatio: silver > 0 ? gold   / silver  : 0,
+    vixVvixRatio:    vvix   > 0 ? vix    / vvix    : 0,
+    btcGoldRatio:    gold   > 0 ? btc    / gold    : 0,
+    oilGoldRatio:    gold   > 0 ? oil    / gold    : 0,
+    yield2y10y:      tnx - fvx,
   }
 }
+
+// ─── FRED yield-history mini-fetch ───────────────────────────────────────────
+//
+// Fetches the last 16 daily observations of DGS10 and DGS2 from the FRED API
+// to power the macro signal engine.  16 obs gives a clean 5-day SMA baseline
+// plus 14 day-over-day changes for the velocity-shock calculation.
+//
+// FRED response is sorted descending (newest first); we reverse to oldest→newest
+// before passing to calculateMacroSignals.
+//
+// Key design choices:
+//   • Runs in parallel with the existing Alpaca/IBKR/FMP fetches — zero added
+//     latency on the critical path.
+//   • Uses Next.js `next: { revalidate: 900 }` (15 min) so the CDN absorbs
+//     the FRED round-trip on the vast majority of requests.
+//   • Races against a 3 000 ms hard deadline; on timeout returns null so the
+//     route still delivers a full market payload — yieldCurveSignal is just null.
+//   • Falls back to null when FRED_API_KEY is absent (demo mode).
+
+const FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations'
+
+interface FredObs { date: string; value: string }
+
+async function fetchFredYieldHistory(
+  seriesId: string,
+  limit = 16,
+): Promise<YieldObservation[]> {
+  const apiKey = process.env.FRED_API_KEY?.trim()
+  if (!apiKey) return []
+
+  const params = new URLSearchParams({
+    series_id:  seriesId,
+    api_key:    apiKey,
+    file_type:  'json',
+    sort_order: 'desc',
+    limit:      String(limit),
+  })
+
+  const res = await fetch(`${FRED_BASE}?${params}`, {
+    next: { revalidate: 900 },   // 15-min CDN cache — FRED updates once/day
+  })
+
+  if (!res.ok) throw new Error(`FRED ${seriesId} → HTTP ${res.status}`)
+
+  const json = await res.json()
+  if (json.error_message) throw new Error(`FRED ${seriesId} → ${json.error_message}`)
+
+  // Filter FRED's '.' sentinel (weekends / holidays) and reverse to ascending
+  const valid: YieldObservation[] = (json.observations as FredObs[])
+    .filter(o => o.value !== '.' && o.value.trim() !== '')
+    .map(o  => ({ date: o.date, rate: parseFloat(o.value) }))
+    .filter(o => Number.isFinite(o.rate))
+    .reverse()   // oldest → newest for SMA / velocity calculations
+
+  return valid
+}
+
+/**
+ * Fetch DGS10 + DGS2 in parallel, compute the macro yield-curve signal.
+ * Returns null if either series is unavailable or the combined fetch times out.
+ */
+async function fetchYieldCurveSignal(): Promise<YieldCurveSignal | null> {
+  try {
+    const [yield10y, yield2y] = await Promise.all([
+      fetchFredYieldHistory('DGS10', 16),
+      fetchFredYieldHistory('DGS2',  16),
+    ])
+
+    if (yield10y.length === 0 || yield2y.length === 0) return null
+
+    return calculateMacroSignals({ yield10y, yield2y })
+  } catch (err) {
+    console.warn(
+      '[market-api] FRED yield-curve signal failed:',
+      err instanceof Error ? err.message : String(err),
+    )
+    return null
+  }
+}
+
+// ─── WALCL Momentum Fetcher ───────────────────────────────────────────────────
+//
+// Fetches ~17 weekly WALCL observations from FRED to derive a rolling
+// 14-day (≈2-week) momentum direction.  Weekly FRED data means 2 obs span
+// ~14 calendar days; we use the most recent vs. the one 2 obs ago.
+//
+// Returns a typed object ready to pass straight into getMacroSignal().
+
+interface WalclMomentum {
+  liquidityDirection:   'expanding' | 'contracting' | 'flat'
+  liquidityMomentum14d: number
+}
+
+async function fetchWalclMomentum(): Promise<WalclMomentum> {
+  const FLAT_THRESHOLD = 0.05 // 0.05 % — treat as flat when change is tiny
+
+  try {
+    const obs = await fetchFredYieldHistory('WALCL', 17)
+    // WALCL is weekly; 2 obs back ≈ 14 calendar days
+    if (obs.length < 3) {
+      return { liquidityDirection: 'flat', liquidityMomentum14d: 0 }
+    }
+
+    const latest = obs[obs.length - 1].rate
+    const prior  = obs[obs.length - 3].rate  // ~14 days ago (2 weekly obs)
+
+    if (!Number.isFinite(latest) || !Number.isFinite(prior) || prior === 0) {
+      return { liquidityDirection: 'flat', liquidityMomentum14d: 0 }
+    }
+
+    const momentum14d = ((latest - prior) / prior) * 100
+
+    const liquidityDirection: 'expanding' | 'contracting' | 'flat' =
+      Math.abs(momentum14d) < FLAT_THRESHOLD
+        ? 'flat'
+        : momentum14d > 0
+          ? 'expanding'
+          : 'contracting'
+
+    return { liquidityDirection, liquidityMomentum14d: momentum14d }
+  } catch {
+    return { liquidityDirection: 'flat', liquidityMomentum14d: 0 }
+  }
+}
+
+// ─── Route Handler ────────────────────────────────────────────────────────────
 
 export async function GET() {
   const marketOpen = isMarketCurrentlyOpen()
 
-  const futuresSymbols  = ['ES=F', 'NQ=F', 'YM=F', 'RTY=F']
-  const equitySymbols   = ['^GSPC', '^NDX', '^DJI', '^RUT']
-  const volSymbols      = ['^VIX', '^VVIX', '^SKEW']
-  const rateSymbols     = ['^IRX', '^FVX', '^TNX', '^TYX']
-  const fxSymbols       = ['DX-Y.NYB', 'EURUSD=X', 'GBPUSD=X', 'JPY=X', 'CNY=X', 'AUDUSD=X', 'BTC-USD']
-  const commSymbols     = ['GC=F', 'SI=F', 'CL=F', 'BZ=F', 'HG=F', 'NG=F']
-
-  const allSymbols = [...futuresSymbols, ...equitySymbols, ...volSymbols, ...rateSymbols, ...fxSymbols, ...commSymbols]
+  // Index ETF proxies — Alpaca us_equity (IEX feed, free tier).
+  // Replaces the old /ES /NQ /YM /RTY futures symbols that Alpaca cannot serve.
+  // SPY ≈ S&P 500, QQQ ≈ Nasdaq-100, DIA ≈ Dow Jones, IWM ≈ Russell 2000.
+  const etfSymbols     = ['SPY', 'QQQ', 'DIA', 'IWM']
+  // Spot indices and vol/rate symbols are fetched via FMP (Alpaca rejects ^ prefix)
+  const equitySymbols  = ['^GSPC', '^NDX', '^DJI', '^RUT']
+  const volSymbols     = ['^VIX', '^VVIX', '^SKEW']
+  const rateSymbols    = ['^IRX', '^FVX', '^TNX', '^TYX']
+  // BTC/USD — Alpaca crypto format (slash, not Yahoo's BTC-USD)
+  const fxSymbols      = ['DX-Y.NYB', 'EURUSD=X', 'GBPUSD=X', 'JPY=X', 'CNY=X', 'AUDUSD=X', 'BTC/USD']
+  // Commodity ETF proxies (Alpaca us_equity) — GC=F/SI=F/CL=F formats rejected by Alpaca
+  const commSymbols    = ['GLD', 'SLV', 'USO', 'BNO', 'CPER', 'UNG']
+  const allSymbols     = [...etfSymbols, ...equitySymbols, ...volSymbols, ...rateSymbols, ...fxSymbols, ...commSymbols]
 
   try {
-    const [quotes, dailySparklines, intradaySparklines] = await Promise.all([
-      fetchYahooQuotes(allSymbols),
-      fetchSparklines([...futuresSymbols, ...equitySymbols], '1h', '5d'),
-      fetchSparklines(futuresSymbols, '15m', '1d'),
+    // Primary: Alpaca (equities/crypto/ETFs) + IBKR snapshot (^-prefixed indices,
+    // vol, rates) — both in parallel, both honour their own server-side caches.
+    // Race IBKR snapshot against a 1 500 ms hard deadline.  The CP Gateway's
+    // internal warm-up sequence (5 s POST + 600 ms wait + 10 s GET) blocks for
+    // ~16 s when the gateway is unreachable.  Losing the race immediately falls
+    // back to FMP so the market route returns in < 1.5 s instead of 16 s.
+    // The IBKR promise is kept in a separate variable so we can attach a
+    // .catch() to it.  Without this, when the 1500ms timeout wins the race the
+    // IBKR promise is still running in the background; its eventual rejection
+    // (e.g. Cancel: AbortError from the internal 5s sub-controller) would reach
+    // Node.js with no handler → UnhandledPromiseRejectionWarning.
+    const ibkrSnapshotPromise = fetchIBKRSnapshotQuotes([...FMP_SYMBOLS])
+    ibkrSnapshotPromise.catch(() => { /* background rejection silenced */ })
+
+    const ibkrSnapshotWithTimeout = Promise.race([
+      ibkrSnapshotPromise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('IBKR snapshot timeout (1500ms)')), 1500),
+      ),
     ])
 
-    // If Yahoo Finance failed (returned empty array), serve structured fallback immediately
-    // without breaking execution. Frontend receives the exact same response shape.
-    if (quotes.length === 0) {
-      console.info('[market-api] Quotes fetch returned empty, using fallback matrix')
-      return NextResponse.json(getMockData(marketOpen))
+    // FRED yield-curve signal + WALCL momentum — both race in parallel so they
+    // add zero latency to the critical Alpaca/IBKR path.  Hard deadline of
+    // 3 000 ms; on timeout or key-absent the signal keys are null/degraded
+    // and the rest of the payload is unaffected.
+    const FRED_DEADLINE_MS = 3000
+    const yieldCurveSignalPromise = Promise.race([
+      fetchYieldCurveSignal(),
+      new Promise<null>(resolve => setTimeout(() => resolve(null), FRED_DEADLINE_MS)),
+    ])
+    const walclMomentumPromise = Promise.race([
+      fetchWalclMomentum(),
+      new Promise<WalclMomentum>(resolve =>
+        setTimeout(() => resolve({ liquidityDirection: 'flat', liquidityMomentum14d: 0 }), FRED_DEADLINE_MS),
+      ),
+    ])
+
+    const [alpacaQuotes, ibkrMap, yieldCurveSignal, walclMomentum] = await Promise.all([
+      fetchQuotes(allSymbols),
+      ibkrSnapshotWithTimeout.catch((err: unknown) => {
+        console.warn(
+          '[market-api] IBKR snapshot unavailable, falling back to FMP: ' +
+          (err instanceof Error ? err.message : String(err)),
+        )
+        return new Map<string, IBKRSnapshotQuote>()
+      }),
+      yieldCurveSignalPromise,
+      walclMomentumPromise,
+    ])
+
+    // FMP fallback: only fetch symbols IBKR didn't return (gateway down / warm-up)
+    const missingFromIBKR = FMP_SYMBOLS.filter(s => !ibkrMap.has(s))
+    const fmpMap = missingFromIBKR.length > 0
+      ? await fetchFMPQuotes(missingFromIBKR).catch(() => new Map<string, FMPQuote>())
+      : new Map<string, FMPQuote>()
+
+    // Merge priority: Alpaca → IBKR → FMP
+    const qmap = new Map(alpacaQuotes.map(q => [q.symbol, q]))
+    for (const [sym, iq] of ibkrMap) {
+      qmap.set(sym, {
+        symbol:        sym,
+        price:         iq.price,
+        change:        iq.change,
+        changePercent: iq.changePercent,
+        high:          iq.high  || undefined,
+        low:           iq.low   || undefined,
+      })
+    }
+    for (const [sym, fq] of fmpMap) {
+      if (!qmap.has(sym)) {
+        qmap.set(sym, fmpToProvider(fq))
+      }
     }
 
-    const qmap = new Map(quotes.map((q) => [q.symbol, q]))
+    const hasAnyData = qmap.size > 0
+
+    // No quotes returned — provider not yet configured; serve null-price skeleton.
+    if (!hasAnyData) {
+      console.info('[market-api] No quotes from either provider — serving unavailable skeleton')
+      return NextResponse.json(getUnavailableData(marketOpen))
+    }
+
+    // Unified macro signal — combines WALCL liquidity momentum with the
+    // yield-curve regime into a single institutional bias + explanation.
+    // Always produces a value (getMacroSignal never throws); degrades to
+    // CAUTIOUS_GROWTH / flat when FRED data is unavailable.
+    const macroSignal: MacroSignal = getMacroSignal({
+      liquidityDirection:   walclMomentum.liquidityDirection,
+      liquidityMomentum14d: walclMomentum.liquidityMomentum14d,
+      yieldCurveSignal,
+    })
+
     const ratios = computeRatios(qmap)
 
     const fmtBase = (symbol: string) => {
       const q = qmap.get(symbol)
       return {
         symbol,
-        name: SYMBOL_NAMES[symbol] ?? symbol,
-        price:         q?.regularMarketPrice        ?? 0,
-        change:        q?.regularMarketChange       ?? 0,
-        changePercent: q?.regularMarketChangePercent ?? 0,
-        high:          q?.regularMarketDayHigh,
-        low:           q?.regularMarketDayLow,
+        name:          SYMBOL_NAMES[symbol] ?? symbol,
+        price:         q?.price         ?? null,
+        change:        q?.change        ?? null,
+        changePercent: q?.changePercent ?? null,
+        high:          q?.high,
+        low:           q?.low,
       }
     }
 
-    // Futures: multi-timeframe sparklines
-    const futures = futuresSymbols.map((sym) => {
+    // Build the "futures" payload from ETF symbols so the tape and grid
+    // both receive live Alpaca prices.  The field stays named "futures" for
+    // backward compat with the dashboard MarketData type.
+    const futures = etfSymbols.map(sym => {
       const base = fmtBase(sym)
-      const live5D  = dailySparklines[sym]   ?? []
-      const live1D  = intradaySparklines[sym] ?? []
-      const mock = multiTFSparklines(sym, base.price || 100, base.change || 0)
-      return {
-        ...base,
-        sparklines: {
-          '1D': live1D.length  > 4 ? live1D  : mock['1D'],
-          '5D': live5D.length  > 4 ? live5D  : mock['5D'],
-          '1M': mock['1M'],
-          '3M': mock['3M'],
-        },
-      }
-    })
-
-    // FX with multi-timeframe
-    const fxWithTF = fxSymbols.map((sym) => {
-      const base = fmtBase(sym)
-      const mock = multiTFSparklines(sym, base.price || 1, base.change || 0)
+      const mock = base.price !== null
+        ? multiTFSparklines(sym, base.price, base.change ?? 0)
+        : { '1D': [], '5D': [], '1M': [], '3M': [] }
       return { ...base, sparklines: mock }
     })
 
-    // Commodities with multi-timeframe
-    const commWithTF = commSymbols.map((sym) => {
+    const fxWithTF = fxSymbols.map(sym => {
       const base = fmtBase(sym)
-      const mock = multiTFSparklines(sym, base.price || 1, base.change || 0)
+      const mock = base.price !== null
+        ? multiTFSparklines(sym, base.price, base.change ?? 0)
+        : { '1D': [], '5D': [], '1M': [], '3M': [] }
+      return { ...base, sparklines: mock }
+    })
+
+    const commWithTF = commSymbols.map(sym => {
+      const base = fmtBase(sym)
+      const mock = base.price !== null
+        ? multiTFSparklines(sym, base.price, base.change ?? 0)
+        : { '1D': [], '5D': [], '1M': [], '3M': [] }
       return { ...base, sparklines: mock }
     })
 
@@ -356,25 +595,30 @@ export async function GET() {
 
     return NextResponse.json({
       futures,
-      equities: equitySymbols.map((sym) => ({
-        ...fmtBase(sym),
-        sparkline: dailySparklines[sym] ?? [],
-      })),
-      rates:       rateSymbols.map((sym) => ({ ...fmtBase(sym), sparkline: [] })),
+      equities:    equitySymbols.map(sym => ({ ...fmtBase(sym), sparkline: [] })),
+      rates:       rateSymbols.map(sym   => ({ ...fmtBase(sym), sparkline: [] })),
       fx:          fxWithTF,
       commodities: commWithTF,
       volatility: {
         vix:          fmtVol('^VIX'),
         vvix:         fmtVol('^VVIX'),
         skew:         fmtVol('^SKEW'),
-        putCallRatio: 0.78,
+        // ^PCCE = CBOE Equity Put/Call Ratio; updates daily post-close.
+        // Fall back to 0.78 (historical neutral) when FMP is unconfigured.
+        putCallRatio: qmap.get('^PCCE')?.price ?? 0.78,
       },
       ratios,
-      timestamp: Date.now(),
+      // Macro yield-curve signal — null when FRED_API_KEY is absent or the
+      // FRED fetch timed out.  Consumers should guard: signal?.regime ?? 'NEUTRAL'
+      yieldCurveSignal,
+      // Unified macro signal — liquidity × curve matrix.  Always present;
+      // degrades gracefully to CAUTIOUS_GROWTH when FRED data is unavailable.
+      macroSignal,
+      timestamp:    Date.now(),
       isMarketOpen: marketOpen,
     })
   } catch (err) {
-    console.error('[market-api] Unexpected error — falling back to mock data:', err)
-    return NextResponse.json(getMockData(marketOpen))
+    console.error('[market-api] Unexpected error:', err)
+    return NextResponse.json(getUnavailableData(marketOpen))
   }
 }

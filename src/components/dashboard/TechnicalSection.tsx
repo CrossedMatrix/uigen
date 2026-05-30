@@ -1,6 +1,6 @@
 'use client'
 
-import { useId } from 'react'
+import { useId, type ReactNode } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,7 +21,9 @@ export interface RatioCard {
   id: string
   name: string
   subtitle: string
-  value: number
+  /** null when the ratio cannot be computed (e.g. 429 rate-limit on a constituent) */
+  value: number | null
+  /** Pre-formatted string; '--' when value is null */
   displayValue: string
   change: number
   status: string
@@ -533,19 +535,21 @@ function MARow({ row }: { row: TechnicalRow }) {
 
 function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
   const col = SIG[ratio.signal]
-  const isRisk = ratio.id === 'risk_regime'
+  const isRisk   = ratio.id === 'risk_regime'
+  const isNull   = ratio.value === null   // data unavailable (rate-limited constituent)
 
-  const regimeLabel = isRisk
-    ? ratio.value < 25 ? 'RISK ON'
-    : ratio.value < 50 ? 'MODERATE'
-    : ratio.value < 75 ? 'ELEVATED'
+  // Risk-card labels — only meaningful when value is non-null
+  const regimeLabel = isRisk && !isNull
+    ? ratio.value! < 25 ? 'RISK ON'
+    : ratio.value! < 50 ? 'MODERATE'
+    : ratio.value! < 75 ? 'ELEVATED'
     : 'RISK OFF'
     : null
 
-  const regimeColor = isRisk
-    ? ratio.value < 25  ? '#34d399'
-    : ratio.value < 50  ? '#fbbf24'
-    : ratio.value < 75  ? '#f97316'
+  const regimeColor = isRisk && !isNull
+    ? ratio.value! < 25  ? '#34d399'
+    : ratio.value! < 50  ? '#fbbf24'
+    : ratio.value! < 75  ? '#f97316'
     : '#f87171'
     : null
 
@@ -559,10 +563,21 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
         <div className="text-[11px] text-slate-300">{ratio.subtitle}</div>
       </div>
 
-      {/* Value row */}
+      {/* Value row — fixed structural height maintained whether data is present or null */}
       <div className="flex items-end justify-between gap-2">
         <div className="min-w-0">
-          {isRisk ? (
+          {isNull ? (
+            // Null zero-state: double-dash at fixed height, no units, low-opacity gray
+            <>
+              <div className="font-mono text-2xl font-semibold leading-none text-slate-500/60 tabular-nums">
+                --
+              </div>
+              {/* Preserve sub-label height so the card doesn't collapse */}
+              <div className="font-mono text-[11px] mt-1 text-slate-600/50">
+                {isRisk ? 'Score --/100' : '--'}
+              </div>
+            </>
+          ) : isRisk ? (
             <>
               <div
                 className="font-mono text-xl font-bold tracking-widest leading-none"
@@ -571,21 +586,26 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
                 {regimeLabel}
               </div>
               <div className="font-mono text-[11px] text-slate-300 mt-1">
-                Score {ratio.value.toFixed(0)}/100
+                Score {(ratio.value as number).toFixed(0)}/100
               </div>
             </>
           ) : (
-            <div className={cn('font-mono text-2xl font-semibold tabular-nums leading-none', col.text)}>
-              {ratio.displayValue}
-            </div>
+            <>
+              <div className={cn('font-mono text-2xl font-semibold tabular-nums leading-none', col.text)}>
+                {ratio.displayValue}
+              </div>
+              {/* Spacer keeps card height consistent with risk card's two-line layout */}
+              <div className="font-mono text-[11px] mt-1 invisible" aria-hidden="true">·</div>
+            </>
           )}
+          {/* Change percentage — muted dash when null */}
           <div
             className={cn(
               'font-mono text-[11px] mt-1',
-              ratio.change >= 0 ? 'text-[#4db8a8]' : 'text-[#b87070]',
+              isNull ? 'text-slate-600/50' : ratio.change >= 0 ? 'text-[#4db8a8]' : 'text-[#b87070]',
             )}
           >
-            {ratio.change >= 0 ? '+' : ''}{ratio.change.toFixed(2)}%
+            {isNull ? '--' : `${ratio.change >= 0 ? '+' : ''}${ratio.change.toFixed(2)}%`}
           </div>
         </div>
 
@@ -597,13 +617,13 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
         <span
           className={cn(
             'text-[10px] font-mono font-semibold tracking-wider px-2 py-0.5 rounded-md border',
-            col.text, col.bg, col.border,
+            isNull ? 'text-slate-600/50 bg-slate-800/20 border-slate-700/30' : cn(col.text, col.bg, col.border),
           )}
         >
-          {ratio.status}
+          {isNull ? '--' : ratio.status}
         </span>
 
-        {isRisk && (
+        {isRisk && !isNull && (
           <div className="flex gap-0.5">
             {[0, 1, 2, 3].map((i) => (
               <div
@@ -611,13 +631,18 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
                 className="h-1.5 w-5 rounded-full transition-all"
                 style={{
                   backgroundColor:
-                    ratio.value / 25 > i ? (regimeColor ?? '#94a3b8') : '#1e293b',
-                  opacity: ratio.value / 25 > i ? 1 : 0.35,
+                    (ratio.value as number) / 25 > i ? (regimeColor ?? '#94a3b8') : '#1e293b',
+                  opacity: (ratio.value as number) / 25 > i ? 1 : 0.35,
                 }}
               />
             ))}
           </div>
         )}
+
+        {/* Keep regime bar space when null so layout doesn't shift */}
+        {isRisk && isNull && <div className="flex gap-0.5">{[0,1,2,3].map(i => (
+          <div key={i} className="h-1.5 w-5 rounded-full bg-[#1e293b] opacity-35" />
+        ))}</div>}
       </div>
 
       {/* Note */}
@@ -630,13 +655,26 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
 
 // ─── Ratios Panel (exportable) ────────────────────────────────────────────────
 
-export function RatiosPanel({ ratios = RATIOS_MOCK }: { ratios?: RatioCard[] }) {
+export function RatiosPanel({
+  ratios     = RATIOS_MOCK,
+  statusBadge,
+}: {
+  ratios?:      RatioCard[]
+  /** Optional badge rendered inline with the panel heading (e.g. WaitingBadge / StatusBadge) */
+  statusBadge?: ReactNode
+}) {
   return (
     <div>
-      <div className="text-[10px] font-mono text-slate-300 uppercase tracking-widest mb-2">
-        Cross-Asset Ratios · Macro Dynamics
+      <div className="flex items-center gap-2 mb-2">
+        <div className="text-[10px] font-mono text-slate-300 uppercase tracking-widest">
+          Cross-Asset Ratios · Macro Dynamics
+        </div>
+        {statusBadge}
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className={cn(
+        'grid grid-cols-1 sm:grid-cols-2 gap-3',
+        ratios.length >= 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4',
+      )}>
         {ratios.map((ratio) => (
           <RatioCardComponent key={ratio.id} ratio={ratio} />
         ))}

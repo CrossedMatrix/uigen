@@ -1,0 +1,143 @@
+{
+  "_description": "Committed seed data for FRED API endpoints. Acts as L3 last-resort fallback when both the live FRED network call and the file cache (.fred-cache/) are unavailable (e.g. fresh checkout, CI, FRED 504/429 on first boot). Always served with status 'CACHED' — never 'AUTHENTICATED'. Update this file periodically by copying a real /api/fred-markets or /api/fed-liquidity response body. See src/lib/services/fredCacheStore.ts for the read path.",
+  "_seedDate": "2026-05-23",
+  "_source": "FRED API authenticated response captured during development session",
+
+  "fred-markets": {
+    "yieldCurve": {
+      "points": [
+        {
+          "seriesId":  "DTB3",
+          "label":     "3M",
+          "maturity":  0.25,
+          "rate":      3.59,
+          "prevRate":  3.59,
+          "change":    0,
+          "changeBps": 0,
+          "date":      "2026-05-23",
+          "high52w":   4.35,
+          "low52w":    3.45
+        },
+        {
+          "seriesId":  "DGS2",
+          "label":     "2Y",
+          "maturity":  2,
+          "rate":      3.88,
+          "prevRate":  3.88,
+          "change":    0,
+          "changeBps": 0,
+          "date":      "2026-05-23",
+          "high52w":   4.40,
+          "low52w":    3.70
+        },
+        {
+          "seriesId":  "DGS5",
+          "label":     "5Y",
+          "maturity":  5,
+          "rate":      4.17,
+          "prevRate":  4.17,
+          "change":    0,
+          "changeBps": 0,
+          "date":      "2026-05-23",
+          "high52w":   4.55,
+          "low52w":    3.85
+        },
+        {
+          "seriesId":  "DGS10",
+          "label":     "10Y",
+          "maturity":  10,
+          "rate":      4.40,
+          "prevRate":  4.40,
+          "change":    0,
+          "changeBps": 0,
+          "date":      "2026-05-23",
+          "high52w":   4.80,
+          "low52w":    4.10
+        },
+        {
+          "seriesId":  "DGS30",
+          "label":     "30Y",
+          "maturity":  30,
+          "rate":      5.01,
+          "prevRate":  5.01,
+          "change":    0,
+          "changeBps": 0,
+          "date":      "2026-05-23",
+          "high52w":   5.15,
+          "low52w":    4.62
+        }
+      ],
+      "spread2y10y":        0.52,
+      "spread2y10yChange":  0,
+      "spread10y3m":        0.81,
+      "spread10y3mChange":  0,
+      "isInverted":         false,
+      "steepeningType":     null,
+      "observationDate":    "2026-05-23",
+      "meta": {
+        "dataSource": "FRED_API",
+        "status":     "AUTHENTICATED",
+        "timestamp":  "2026-05-23T20:00:00.000Z"
+      }
+    },
+    "dxy": {
+      "broad": {
+        "seriesId":   "DTWEXBGS",
+        "label":      "DXY BROAD",
+        "value":      103.42,
+        "prevValue":  103.42,
+        "change":     0,
+        "changePct":  0,
+        "date":       "2026-05-22"
+      },
+      "afe": {
+        "seriesId":   "DTWEXAFEGS",
+        "label":      "DXY AFE",
+        "value":      96.87,
+        "prevValue":  96.87,
+        "change":     0,
+        "changePct":  0,
+        "date":       "2026-05-22"
+      },
+      "meta": {
+        "dataSource": "FRED_API",
+        "status":     "AUTHENTICATED",
+        "timestamp":  "2026-05-23T20:00:00.000Z"
+      }
+    },
+    "meta": {
+      "dataSource": "FRED_API",
+      "status":     "AUTHENTICATED",
+      "timestamp":  "2026-05-23T20:00:00.000Z"
+    }
+  },
+
+  "fed-liquidity": {
+    "date":              "2026-05-21",
+    "balanceSheetTotal": 6704.383,
+    "tga":               830.296,
+    "rrp":               1.163,
+    "netLiquidity":      5872.924,
+    "momentum14d":       -0.42,
+    "momentumDirection": "contracting",
+    "hyOasSpread":       3.52,
+    "hyOasDate":         "2026-05-23",
+    "stlfsi":            -0.18,
+    "stlfsiDate":        "2026-05-16",
+    "meta": {
+      "dataSource":  "FRED_API",
+      "status":      "AUTHENTICATED",
+      "seriesDates": {
+        "fta": "2026-05-21",
+        "tga": "2026-05-21",
+        "rro": "2026-05-23"
+      },
+      "timestamp": "2026-05-23T20:00:00.000Z",
+      "diagnostics": {
+        "fta": { "resolvedSeriesId": "WALCL",     "ok": true, "usedFallback": false },
+        "tga": { "resolvedSeriesId": "WTREGEN",   "ok": true, "usedFallback": false },
+        "rro": { "resolvedSeriesId": "RRPONTSYD", "ok": true, "usedFallback": false }
+      }
+    }
+  }
+}

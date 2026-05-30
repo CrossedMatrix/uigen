@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   FedLiquiditySnapshot,
-} from '@/lib/squawk-types'
+} from '@/lib/types/fed-liquidity'
 
 // ─── Local fallback (shown instantly, replaced once fetch resolves) ────────────
 
@@ -16,7 +16,7 @@ const FALLBACK: FedLiquiditySnapshot = {
   meta: {
     dataSource:  'MOCK_FALLBACK',
     status:      'DEMO_FALLBACK',
-    seriesDates: { walcl: '—', wtregen: '—', rrpontsyd: '—' },
+    seriesDates: { fta: '—', tga: '—', rro: '—' },
     timestamp:   new Date().toISOString(),
   },
 }

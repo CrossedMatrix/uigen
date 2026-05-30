@@ -1,8 +1,11 @@
 'use client'
 
-import { useId, useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { usePersistState } from '@/lib/hooks/usePersistState'
+import { useAlpacaData } from '@/hooks/useAlpacaData'
+import type { AlpacaQuote } from '@/app/api/alpaca/route'
 import type { PositioningRow, MacroPositioningData } from '@/app/api/macro-positioning/route'
+import { StatusBadge } from '@/components/dashboard/StatusBadge'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,11 +23,41 @@ export interface COTAsset {
   positioningScale?: number
 }
 
+/**
+ * Technical trigger level where the trend-follower model flips net exposure.
+ * Calculated as ~4-5% from the estimated current spot for each underlying.
+ */
+export interface CTAFlipMeta {
+  /** Formatted price / index level string, e.g. "5,519" or "$92.20" */
+  level: string
+  /** % distance from estimated spot — negative = below spot, positive = above */
+  pctFromSpot: number
+  /** Which side triggers the flip: break BELOW (long→short) or break ABOVE (short→long) */
+  direction: 'below' | 'above'
+}
+
+/**
+ * Dollar-notional flow projection if the trend continues or the flip level breaks
+ * over the next 5 trading sessions.
+ */
+export interface CTAFlowMeta {
+  /** Formatted notional string, e.g. "$8.4B" or "$650M" */
+  amount: string
+  /** Human-readable execution action */
+  action: 'Buy' | 'Add' | 'Liquidate' | 'Reduce' | 'Cover' | 'Sell'
+  /** +1 = buy / inflow pressure,  -1 = sell / outflow pressure */
+  sign: 1 | -1
+}
+
 export interface CTAGaugeRow {
   label: string
   exposure: number
   prevExposure: number
   signal: 'neutral' | 'exhaustion_risk' | 'bearish' | 'bullish'
+  /** CTA flip-price metadata — rendered beneath the progress bar */
+  ctaFlip?: CTAFlipMeta
+  /** Estimated 5-session flow impact — rendered alongside ctaFlip */
+  flow5D?: CTAFlowMeta
 }
 
 export interface SkewTicker {
@@ -35,30 +68,10 @@ export interface SkewTicker {
   signal: 'upside_demand' | 'balanced' | 'hedging'
 }
 
-export interface BottleneckSide {
-  label: string
-  tickers: string[]
-  peRatio: number
-  revenueGrowthPct: number
-  return30dPct: number
-  return90dPct: number
-  epsGrowthPct: number
-}
-
-export interface BottleneckData {
-  breadth: BottleneckSide
-  concentration: BottleneckSide
-  ratio: number
-  ratioTrend: 'concentration_rising' | 'breadth_expanding' | 'balanced'
-  ratioChange30d: number
-  sparkline: number[]
-}
-
 export interface FlowsData {
   cot: COTAsset[]
   ctaGauges: CTAGaugeRow[]
   techSkew: SkewTicker[]
-  bottleneck: BottleneckData
 }
 
 // ─── Skew Database (searchable) ───────────────────────────────────────────────
@@ -129,36 +142,36 @@ const SOFTWARE_TICKERS_50 = [
 export const FLOWS_MOCK: FlowsData = {
   cot: [],
   ctaGauges: [
-    { label: 'Global Equities',  exposure:  87, prevExposure: 79, signal: 'exhaustion_risk' },
-    { label: 'Emerging Markets', exposure:  34, prevExposure: 28, signal: 'neutral'         },
-    { label: 'US Fixed Income',  exposure: -22, prevExposure: -18, signal: 'bearish'        },
-    { label: 'Commodities',      exposure:  61, prevExposure: 65, signal: 'neutral'         },
+    {
+      label: 'Global Equities', exposure: 87, prevExposure: 79, signal: 'exhaustion_risk',
+      // S&P 500 proxy spot ~5,780 · flip = −4.5% break below
+      ctaFlip: { level: '5,519', pctFromSpot: -4.5, direction: 'below' },
+      // At 87% long + exhaustion: systematic liquidation on trigger
+      flow5D:  { amount: '$8.4B', action: 'Liquidate', sign: -1 },
+    },
+    {
+      label: 'Emerging Markets', exposure: 34, prevExposure: 28, signal: 'neutral',
+      // MSCI EM proxy spot ~1,182 · flip = −4.7% break below (trend still building)
+      ctaFlip: { level: '1,127', pctFromSpot: -4.7, direction: 'below' },
+      // Trending up from 28% → 34%: mechanical buying continues if trend holds
+      flow5D:  { amount: '$1.2B', action: 'Add', sign: 1 },
+    },
+    {
+      label: 'US Fixed Income', exposure: -22, prevExposure: -18, signal: 'bearish',
+      // Short bonds (TLT proxy ~$88.20) · shorts cover on +4.5% rally to $92.20
+      ctaFlip: { level: '$92.20', pctFromSpot: +4.5, direction: 'above' },
+      // Rally through flip level forces systematic short-covering = buying
+      flow5D:  { amount: '$2.1B', action: 'Cover', sign: 1 },
+    },
+    {
+      label: 'Commodities', exposure: 61, prevExposure: 65, signal: 'neutral',
+      // DJP basket proxy spot ~$28.80 · flip = −4.2% break below
+      ctaFlip: { level: '$27.59', pctFromSpot: -4.2, direction: 'below' },
+      // Declining from 65% → 61%: further reduction likely; not full liquidation
+      flow5D:  { amount: '$650M', action: 'Reduce', sign: -1 },
+    },
   ],
   techSkew: [],
-  bottleneck: {
-    breadth: {
-      label: 'Market Breadth',
-      tickers: ['BRK.B','JPM','UNH','XOM','JNJ','PG','COST','AMGN','HD','MMM','GE','BA','LMT','CAT','NSC','UPS','EMR','ABT','MCD','PEP'],
-      peRatio: 18.3,
-      revenueGrowthPct: 6.2,
-      epsGrowthPct: 7.4,
-      return30dPct: 2.1,
-      return90dPct: 5.8,
-    },
-    concentration: {
-      label: 'Mega-Cap Concentration',
-      tickers: ['MSFT','NVDA','AAPL','GOOGL','AMZN','META','AVGO','TSLA','LLY','NFLX'],
-      peRatio: 42.8,
-      revenueGrowthPct: 24.6,
-      epsGrowthPct: 31.2,
-      return30dPct: 8.4,
-      return90dPct: 18.6,
-    },
-    ratio: 2.34,
-    ratioTrend: 'concentration_rising',
-    ratioChange30d: +0.18,
-    sparkline: [1.92,1.98,2.05,2.12,2.18,2.21,2.26,2.29,2.31,2.32,2.33,2.33,2.34,2.34,2.34],
-  },
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -167,9 +180,31 @@ function cn(...classes: (string | undefined | false | null)[]) {
   return classes.filter(Boolean).join(' ')
 }
 
+/**
+ * Format a contract count into a signed "K" string, e.g. +31K / −12K / 0K.
+ *
+ * The returned string ALREADY carries its own sign — callers must NOT prepend
+ * another '+' (that produced the "++31K" double-plus bug).  Values that round
+ * to zero are emitted as a clean "0K" with no sign, fixing the "−0K" artefact
+ * that appeared for tiny negative changes (e.g. −400 → round → −0).
+ */
 function fmtK(n: number): string {
-  const sign = n >= 0 ? '+' : '−'
-  return `${sign}${Math.abs(Math.round(n / 1000)).toLocaleString()}K`
+  const k = Math.round(n / 1000)
+  if (k === 0) return '0K'                       // strip sign on zero → "0K"
+  const sign = k > 0 ? '+' : '−'
+  return `${sign}${Math.abs(k).toLocaleString()}K`
+}
+
+/**
+ * Format a week-over-week momentum percentage, e.g. +8% / −15% / 0%.
+ * Single sign only; a value that rounds to zero is emitted as a clean "0%"
+ * (fixes the "+0%" and "+-0%" artefacts from the old `+`-prepend logic).
+ */
+function fmtMomentumPct(pct: number): string {
+  const rounded = Math.round(pct)
+  if (rounded === 0) return '0%'                 // strip sign on zero → "0%"
+  const sign = rounded > 0 ? '+' : '−'
+  return `${sign}${Math.abs(rounded)}%`
 }
 
 // Symbol name mapping (modern CFTC contract codes)
@@ -301,17 +336,110 @@ function HistoricalScaleBar({ positioningScale }: { positioningScale: number }) 
 
 // ─── Unified Positioning Matrix Row ───────────────────────────────────────────
 
+// ── Dynamic Execution copy ────────────────────────────────────────────────────
+// Returns the cross-market interpretation shown in the signal popup's EXECUTION
+// block, evaluated against the active row.  Three families:
+//
+//   indexes    → per-contract read of what the equity index positioning means
+//                for the broad stock market (ES / NQ / RTY / VX).
+//   commodity  → per-contract trade-phase + equity impact (HG / CL / NG / GC / SI).
+//   treasuries → signal-state machine keyed off "signal active" + weeks-at-extreme
+//                (COILING → ACTIVE SQUEEZE → NOT THERE).
+//
+// Anything not explicitly mapped (currency, un-listed tenors) falls back to a
+// generic framing so a popup is never blank.
+function computeExecutionText(
+  row:            PositioningRow,
+  isExtreme:      boolean,
+  weeksAtExtreme: number,
+): string {
+  switch (row.category) {
+    // ── EQUITY INDEXES ──────────────────────────────────────────────────────
+    case 'indexes':
+      switch (row.symbol) {
+        case 'ES':
+          return "Institutions are maintaining a heavily hedged short overlay here (-402K contracts). This means a sudden turn in price will trigger a massive structural short cover, fuel-injecting a rapid squeeze back toward all-time highs."
+        case 'NQ':
+          return "With a -66K contract short bias sitting at the 9th percentile, the smart money is heavily leaning against tech. Watch for a liquidity flush to clean out these late shorts before a high-duration growth stock rally resumes."
+        case 'RTY':
+          return "Net short positioning here reflects severe institutional skepticism toward small-cap cyclical growth. A reversal here acts as a textbook early indicator of a broader macro reflation regime shift."
+        case 'VX':
+          return "Net short positioning at the 47th percentile shows a completely normalized volatility premium. This indicates low institutional demand for systemic tail-risk hedges, supporting a structural grind higher in major equity indexes."
+        default:
+          return "The 'Weeks at Extreme' counter tells you when the smart money is completely maxed out. Enter long when a short squeeze triggers a market-wide liquidity flush, and exit as the broad market indexes exhaust their moves."
+      }
+
+    // ── HARD ASSETS / COMMODITIES ───────────────────────────────────────────
+    case 'commodity':
+      switch (row.symbol) {
+        case 'HG':
+          return "STATUS: MOMENTUM EXTENSION. Institutional positioning is pinned at the 99th percentile extreme. The long accumulation is active and driving. This confirms robust global industrial demand—supporting an equity 'Risk On' regime and acting as a major green light for cyclical sectors and industrial equities."
+        case 'CL':
+        case 'NG':
+          return "STATUS: REGIME NEUTRAL. Institutional positioning is perfectly balanced within normal historical bands (36th-40th percentile). There is no crowded imbalance or structural squeeze to exploit right now. Pass on tactical futures execution and look for broad energy equity setups (XLE) driven by localized supply metrics."
+        case 'GC':
+        case 'SI':
+          return "STATUS: SAFE-HAVEN CONSOLIDATION. Precious metals positioning is holding stable in the high-40s percentile. Capital is neither aggressively crowding in nor panicking out. Watch the Gold/Silver ratio for a compression shift to signal industrial risk-on sentiment before deploying capital into mining equities."
+        default:
+          return "Track the extreme momentum. A massive short squeeze here signals heavy global inflationary pressure or a growth shock, which typically forces a hawkish Fed bias and puts immediate downward pressure on broad equity multiples."
+      }
+
+    // ── TREASURIES ──────────────────────────────────────────────────────────
+    case 'treasuries': {
+      // "Signal active" = a multi-year extreme is registering (SQUEEZE divergence
+      // or top/bottom-decile positioning).  Otherwise positioning is normalized.
+      const signalActive = row.divergenceVector === 'SQUEEZE' || isExtreme
+      if (signalActive && weeksAtExtreme === 0) {
+        return "STATUS: COILING / SETTING UP. The massive -1.6M institutional short position is completely maxed out at the 0th percentile. The spring is fully coiled, but the trigger hasn't fired yet. Watch for a daily reversal candle or an algorithmic volume spike to confirm the institutions are beginning to scramble."
+      }
+      if (signalActive && weeksAtExtreme > 0) {
+        return `STATUS: ACTIVE SQUEEZE TRIGGERED. This crowded short has held historical limits for ${weeksAtExtreme} weeks and the unwind is actively underway. Yields are falling, and the panic cover is structural. Long positions are high-conviction right now; do not stand in the way of the flush.`
+      }
+      return "STATUS: NOT THERE. Institutional positioning is perfectly normalized within historical bands. There is no crowded imbalance to exploit here. Pass on this asset and wait for positioning to push back to a 0th or 100th percentile extreme."
+    }
+
+    // ── CURRENCY / FALLBACK ─────────────────────────────────────────────────
+    default:
+      return "Track the extreme momentum. A massive short squeeze here signals heavy global inflationary pressure or a growth shock, which typically forces a hawkish Fed bias and puts immediate downward pressure on broad equity multiples."
+  }
+}
+
 function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: PositioningRow; isExtreme: boolean; hasCommericalInversion: boolean }) {
   const displayName = SYMBOL_NAME_MAP[row.symbol] || row.symbol
-  const accelerationPct = row.weeklyChange !== undefined ? ((row.weeklyChange / (Math.abs(row.leveragedNet) + 1)) * 100).toFixed(0) : '0'
+
+  // ── Week-over-week momentum velocity ─────────────────────────────────────────
+  // Momentum = Change ÷ |Previous Position|, where Previous = Current − Change.
+  // The denominator is wrapped in Math.abs() so the velocity magnitude is taken
+  // against the size of last week's baseline regardless of its sign (a net-short
+  // book still has a positive contract base).  Dividing by the *current* position
+  // understated velocity and was wrong when the position grew over the week.
+  // Guard against a zero previous position (Infinity/NaN) by returning 0%.
+  const prevPosition = row.leveragedNet - row.weeklyChange
+  const momentumPct =
+    prevPosition === 0 || row.weeklyChange === undefined
+      ? 0
+      : (row.weeklyChange / Math.abs(prevPosition)) * 100
+
   const weeksAtExtreme = 0
   const posScale = row.positioningScale ?? 50
   const isShort = row.leveragedNet < 0
   const isLong = row.leveragedNet > 0
 
-  // Extract momentum vectors for dynamic thesis injection
-  const velocity1W = row.weeklyChange ? fmtK(row.weeklyChange) : '0K'
-  const acceleration3W = accelerationPct
+  // ── Dynamic Core Thesis ──────────────────────────────────────────────────────
+  // Swaps the positioning direction and the unwind terminology based on whether
+  // the active contract's leveraged-fund net positioning is short or long:
+  //   leveragedNet < 0  → Net Short  → the eventual unwind is a "short squeeze"
+  //   leveragedNet ≥ 0  → Net Long   → the eventual unwind is a "long liquidation"
+  const netDirection = isShort ? 'Net Short' : 'Net Long'
+  const unwindType   = isShort ? 'short squeeze' : 'long liquidation'
+  const dynamicThesis =
+    `Institutions are currently heavily ${netDirection} on this asset, while commercial hedgers are positioned the exact opposite way. ` +
+    `This sets up a crowded trade where retail can exploit the eventual ${unwindType} unwind.`
+
+  // ── Dynamic Execution ────────────────────────────────────────────────────────
+  // Per-asset cross-market interpretation — see computeExecutionText() above for
+  // the full INDEXES / HARD-ASSETS / TREASURIES mapping.
+  const dynamicExecution = computeExecutionText(row, isExtreme, weeksAtExtreme)
 
   // Determine signal with actionable trading bias
   let signalBadge: React.ReactNode = null
@@ -330,8 +458,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
           }}>
             <span className="text-[10px] font-mono font-bold">⚡ SCALP LONG (SQUEEZE)</span>
           </div>}
-          thesis={`CORE THESIS: Structural Inversion Detected. Speculators are max SHORT (structural exhaustion), while Commercials are max LONG (supply injection). Aggressor Direction: Specs pushed prices DOWN, but commercials have positioned to absorb further selling. Exhaustion Direction: The SHORT thesis is terminally exhausted—every spec short hit becomes a commercial bid. Reversal Direction: Specs trapped in shorts face a liquidity trap; the market snaps UP sharply. With 1W momentum at ${velocity1W} and 3W acceleration at ${Number(acceleration3W) >= 0 ? '+' : ''}${acceleration3W}%, the squeeze mechanics are actively firing. Path of least resistance = UP.`}
-          execution="Enter tight long above the technical break. Exit short positions immediately. Target: nearest resistance above supply injection zone. Stop: close below structural lows."
+          thesis={dynamicThesis}
+          execution={dynamicExecution}
         />
       )
     } else if (isLong) {
@@ -346,8 +474,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
           }}>
             <span className="text-[10px] font-mono font-bold">⚡ SCALP SHORT (SQUEEZE)</span>
           </div>}
-          thesis={`CORE THESIS: Structural Inversion Detected. Speculators are max LONG (structural exhaustion), while Commercials are max SHORT (demand destruction). Aggressor Direction: Specs pushed prices UP, but commercials have positioned to absorb further buying. Exhaustion Direction: The LONG thesis is terminally exhausted—every spec long hit becomes a commercial offer. Reversal Direction: Specs trapped in longs face a liquidity trap; the market snaps DOWN sharply. With 1W momentum at ${velocity1W} and 3W acceleration at ${Number(acceleration3W) >= 0 ? '+' : ''}${acceleration3W}%, the squeeze mechanics are actively firing. Path of least resistance = DOWN.`}
-          execution="Enter tight short below the technical break. Exit long positions immediately. Target: nearest support below demand destruction zone. Stop: close above structural highs."
+          thesis={dynamicThesis}
+          execution={dynamicExecution}
         />
       )
     }
@@ -364,8 +492,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
           }}>
             <span className="text-[10px] font-mono font-bold">▼ BIAS: DISTRIBUTE SHORT</span>
           </div>}
-          thesis={`CORE THESIS: Aggressor Direction: Institutions drove prices DOWN aggressively, piling specs into maximum short positioning (< 10% scale). Exhaustion Direction: The DOWN move can no longer be sustained—selling capacity is exhausted, every new seller finds fewer willing buyers at lower prices. Reversal Direction: The path of least resistance flips UP. With 1W momentum at ${velocity1W} and 3W acceleration at ${Number(acceleration3W) >= 0 ? '+' : ''}${acceleration3W}%, any fresh buying pressure will snap prices upward sharply as the market discovers structural support. This is where distribution rallies ignite.`}
-          execution="Distribute into any UP rallies. Target exits on recoveries above the 25th percentile. Monitor for the inevitable breakdown reversal once capitulation selling dries up."
+          thesis={dynamicThesis}
+          execution={dynamicExecution}
         />
       )
     } else if (posScale > 90) {
@@ -379,8 +507,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
           }}>
             <span className="text-[10px] font-mono font-bold">▲ BIAS: ACCUMULATE LONG</span>
           </div>}
-          thesis={`CORE THESIS: Aggressor Direction: Institutions drove prices UP aggressively, piling specs into maximum long positioning (> 90% scale). Exhaustion Direction: The UP move can no longer be sustained—buying capacity is exhausted, every new buyer finds fewer willing sellers at higher prices. Reversal Direction: The path of least resistance flips DOWN. With 1W momentum at ${velocity1W} and 3W acceleration at ${Number(acceleration3W) >= 0 ? '+' : ''}${acceleration3W}%, any fresh selling pressure will snap prices downward sharply as the market discovers structural resistance. This is where accumulation pullbacks ignite.`}
-          execution="Accumulate into any DOWN pullbacks. Target entries on dips below the 75th percentile. Monitor for the inevitable breakdown reversal once capitulation buying dries up."
+          thesis={dynamicThesis}
+          execution={dynamicExecution}
         />
       )
     }
@@ -395,8 +523,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
         }}>
           <span className="text-[10px] font-mono font-bold">⚪ NEUTRAL REGIME</span>
         </div>}
-        thesis={`CORE THESIS: Institutional positioning is fundamentally balanced relative to its 3-year history. Currently, big money is moving at a 1W velocity of ${velocity1W} with a 3W acceleration pace of ${Number(acceleration3W) >= 0 ? '+' : ''}${acceleration3W}%. This shows institutional flows are peacefully validating current market spot trends with zero structural friction.`}
-        execution="Avoid forcing mean-reversion setups; follow active trend-following parameters."
+        thesis={dynamicThesis}
+        execution={dynamicExecution}
       />
     )
   }
@@ -427,16 +555,25 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
         </div>
       </div>
 
-      {/* MOMENTUM VECTOR: 1W Velocity + 3W % Acceleration */}
-      <div className="text-right">
+      {/* MOMENTUM VECTOR: 1W Velocity + W/W % Momentum — centered over the column */}
+      <div className="text-center">
         <div className="font-mono text-xs text-slate-200">
-          <span style={{ color: row.weeklyChange >= 0 ? '#34d399' : '#f87171' }}>
-            {row.weeklyChange >= 0 ? '+' : ''}{fmtK(row.weeklyChange)}
-          </span>
-          <span className="text-slate-400"> / </span>
-          <span style={{ color: Number(accelerationPct) >= 0 ? '#34d399' : '#f87171' }}>
-            {Number(accelerationPct) >= 0 ? '+' : ''}{accelerationPct}%
-          </span>
+          {Math.round(row.weeklyChange / 1000) === 0 || Math.round(momentumPct) === 0 ? (
+            // Zero state — one clean string, never "−0K / +-0%".
+            <span className="text-slate-400">0K / 0%</span>
+          ) : (
+            <>
+              {/* fmtK / fmtMomentumPct each carry their own single sign (Math.abs
+                  applied internally) — never prepend another '+' or '−' here. */}
+              <span style={{ color: row.weeklyChange >= 0 ? '#34d399' : '#f87171' }}>
+                {fmtK(row.weeklyChange)}
+              </span>
+              <span className="text-slate-400"> / </span>
+              <span style={{ color: momentumPct >= 0 ? '#34d399' : '#f87171' }}>
+                {fmtMomentumPct(momentumPct)}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -456,8 +593,8 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
         <div className="text-[9px] text-slate-500">weeks</div>
       </div>
 
-      {/* TRIGGER SIGNAL */}
-      <div className="flex justify-end">
+      {/* TRIGGER SIGNAL — pill badge flex-centered in the column */}
+      <div className="flex justify-center">
         {signalBadge || <div className="text-slate-600 text-[10px]">—</div>}
       </div>
     </div>
@@ -466,10 +603,26 @@ function UnifiedMatrixRow({ row, isExtreme, hasCommericalInversion }: { row: Pos
 
 // ─── Unified Institutional Matrix ──────────────────────────────────────────────
 
+// ─── Category config for the unified view (FX omitted per dashboard spec) ─────
+const UNIFIED_CATEGORIES = [
+  { key: 'indexes',    label: 'INDEXES',     color: '#60a5fa' },
+  { key: 'treasuries', label: 'TREASURIES',  color: '#a78bfa' },
+  { key: 'commodity',  label: 'HARD ASSETS', color: '#fbbf24' },
+] as const
+
+type UnifiedCategory = typeof UNIFIED_CATEGORIES[number]['key']
+
 export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] }) {
   const [liveData, setLiveData] = useState<PositioningRow[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(new Set(['indexes']))
+  // Default: only the equity-index category is active on mount, so the matrix
+  // opens showing just the 4 index contracts (ES · NQ · RTY · VX).  Users toggle
+  // Treasuries / Hard Assets in via the filter pills.  NOTE: the key must be the
+  // lowercase category id ('indexes') the row-filter compares against — not
+  // 'INDEXES' — or `selectedCategories.has(row.category)` would match nothing.
+  const [selectedCategories, setSelectedCategories] = useState<Set<string>>(
+    new Set(['indexes'])
+  )
 
   // Fetch live data
   useEffect(() => {
@@ -513,10 +666,7 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
         <div>
           <div className="flex items-center gap-2 mb-2">
             <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">CFTC COT — Institutional Positioning &amp; Squeeze Engine</h3>
-            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-emerald-400/30 bg-emerald-400/8">
-              <div className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse ring-2 ring-emerald-400/50" />
-              <span className="text-[9px] font-mono text-emerald-400 font-semibold uppercase tracking-wider">Live Sync</span>
-            </div>
+            <StatusBadge variant="live" label="REAL-TIME CFTC" title="Live CFTC Commitments of Traders data" />
           </div>
           {mrCount > 0 && (
             <div className="text-[11px] font-mono text-red-400/70">
@@ -530,15 +680,10 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
         </div>
       </div>
 
-      {/* Category filter pills */}
+      {/* Category filter pills — FX omitted */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Categories:</span>
-        {[
-          { key: 'indexes', label: 'Indices', color: '#60a5fa' },
-          { key: 'treasuries', label: 'Rates', color: '#a78bfa' },
-          { key: 'currency', label: 'FX', color: '#34d399' },
-          { key: 'commodity', label: 'Commodities', color: '#fbbf24' },
-        ].map(({ key, label, color }) => {
+        <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Filter:</span>
+        {UNIFIED_CATEGORIES.map(({ key, label, color }) => {
           const isActive = selectedCategories.has(key)
           return (
             <button
@@ -569,10 +714,12 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
           className="grid items-center gap-2 px-3 py-2 bg-slate-900/30"
           style={{ gridTemplateColumns: '10rem 7rem 9rem 2.5fr 6rem 8rem' }}
         >
+          {/* ASSET & LEV. FUNDS — alignment unchanged (left / right) */}
           <div className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">Asset</div>
           <div className="text-right text-[10px] font-mono text-slate-400 uppercase tracking-widest">Lev. Funds</div>
-          <div className="text-right text-[10px] font-mono text-slate-400 uppercase tracking-widest">Momentum</div>
-          <div className="flex items-center gap-1.5">
+          {/* MOMENTUM · HISTORICAL SCALE · WEEKS · SIGNAL — centered over their cells */}
+          <div className="text-center text-[10px] font-mono text-slate-400 uppercase tracking-widest">Momentum</div>
+          <div className="flex items-center gap-1.5 justify-center">
             <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">Historical Scale</span>
             <Tooltip text="3-year COT positioning percentile. Extremes (<10% or >90%) signal exhaustion zones.">
               (?)
@@ -584,7 +731,7 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
               (?)
             </Tooltip>
           </div>
-          <div className="flex items-center gap-1.5 justify-end">
+          <div className="flex items-center gap-1.5 justify-center">
             <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest">Signal</span>
             <Tooltip text="SQUEEZE: extreme + commercials opposed. EXHAUSTION: extreme without commercial inversion.">
               (?)
@@ -593,21 +740,50 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
         </div>
       </div>
 
-      {/* Table body */}
+      {/* Table body — grouped by category */}
       {filtered.length === 0 ? (
         <div className="text-center py-6 text-[11px] text-slate-500 font-mono">No assets in selected categories</div>
       ) : (
-        <div className="divide-y divide-slate-800/30">
-          {filtered.map((row) => {
-            const isExtreme = (row.positioningScale ?? 50) < 10 || (row.positioningScale ?? 50) > 90
-            const hasCommericalInversion = true // Simplified for now
+        <div>
+          {UNIFIED_CATEGORIES.filter(cat => selectedCategories.has(cat.key)).map(({ key, label, color }) => {
+            const rows = liveData.filter(r => (r.category || 'commodity') === key)
+            if (rows.length === 0) return null
             return (
-              <UnifiedMatrixRow
-                key={row.symbol}
-                row={row}
-                isExtreme={isExtreme}
-                hasCommericalInversion={hasCommericalInversion}
-              />
+              <div key={key}>
+                {/* Category section header */}
+                <div
+                  className="px-3 py-1.5 flex items-center gap-2 border-b border-slate-800/80"
+                  style={{ backgroundColor: `${color}10` }}
+                >
+                  <div
+                    className="w-1.5 h-3 rounded-sm flex-shrink-0"
+                    style={{ backgroundColor: color }}
+                  />
+                  <span
+                    className="text-[9px] font-mono font-bold uppercase tracking-[0.18em]"
+                    style={{ color }}
+                  >
+                    {label}
+                  </span>
+                  <span className="text-[9px] font-mono text-slate-600">
+                    {rows.length} contracts
+                  </span>
+                </div>
+                {/* Asset rows */}
+                <div className="divide-y divide-slate-800/30">
+                  {rows.map((row) => {
+                    const isExtreme = (row.positioningScale ?? 50) < 10 || (row.positioningScale ?? 50) > 90
+                    return (
+                      <UnifiedMatrixRow
+                        key={row.symbol}
+                        row={row}
+                        isExtreme={isExtreme}
+                        hasCommericalInversion={true}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
             )
           })}
         </div>
@@ -616,9 +792,9 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
       {/* Footer explanation */}
       <div className="mt-4 pt-3 border-t border-slate-800/50">
         <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
-          <strong>Squeeze Engine:</strong> Identifies moments when leveraged funds hold structural extremes (&gt;90% long or &lt;10%) coinciding with commercial hedger opposition.
-          <strong className="text-amber-400/70"> Weeks at Extreme</strong> measure coil duration—prolonged extremes precede explosive reversals.
-          <strong className="text-red-400/70"> SQUEEZE signals</strong> fire when positioned contra to commercials; revert when alignment shifts.
+          <strong className="text-slate-400">Squeeze Engine:</strong> Tracks when institutional funds are heavily over-positioned in one direction while commercial hedgers bet the exact opposite way.{' '}
+          <strong className="text-amber-400/70">&apos;Weeks at Extreme&apos;</strong> shows how long this tension has been building—the longer it holds, the bigger the potential explosive reversal.{' '}
+          A <strong className="text-red-400/70">SQUEEZE</strong> signal fires when it&apos;s time to trade against the institutions, and turns off when the market flushes out.
         </p>
       </div>
     </div>
@@ -627,269 +803,237 @@ export function UnifiedPositioningMatrix({ cot: defaultCot }: { cot: COTAsset[] 
 
 // ─── CTA Gauge ────────────────────────────────────────────────────────────────
 
-function CTAGauge({ row }: { row: CTAGaugeRow }) {
-  const { label, exposure, prevExposure, signal } = row
-  const isNegative = exposure < 0
-  const pctAbs = Math.abs(exposure)
-  const barColor = signal === 'exhaustion_risk' ? '#f87171' : signal === 'bearish' ? '#f87171' : pctAbs > 70 ? '#fbbf24' : '#34d399'
-  const delta = exposure - prevExposure
-  const deltaColor = delta > 0 ? '#34d399' : delta < 0 ? '#f87171' : '#94a3b8'
-  const deltaArrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '→'
+// ─── Systematic Execution Playbook ─────────────────────────────────────────────
+//
+// Regime classification from the net exposure derived by the CTA engine:
+//   MAX LONG  exposure ≥ 70  → trend desks fully long, trailing stop-sells active
+//   SHORT     exposure < 0   → desks net short
+//   NEUTRAL   0 … 70         → sidelined / building
+function ctaRegime(exposure: number): { label: string; color: string; isLong: boolean } {
+  if (exposure >= 70) return { label: 'MAX LONG', color: '#34d399', isLong: true }
+  if (exposure < 0)   return { label: 'SHORT',    color: '#f87171', isLong: false }
+  return { label: 'NEUTRAL', color: '#fbbf24', isLong: false }
+}
+
+// Order Execution Directive — long books trail a stop-sell; short/sidelined books
+// rest buy-stops above to capture the short-covering velocity on a break higher.
+function executionDirective(isLong: boolean, flipLevel: string): string {
+  return isLong
+    ? `Maintain long exposure. Trailing stop-sell orders active at ${flipLevel}.`
+    : `Desks are short/sidelined. System buy-stops rest at ${flipLevel} to capture short-covering velocity.`
+}
+
+function PlaybookRow({ row }: { row: CTAGaugeRow }) {
+  const { label, exposure, ctaFlip } = row
+  const regime    = ctaRegime(exposure)
+  const flipLevel = ctaFlip?.level ?? '--'
+  // % distance to trigger = live (flip − spot) / spot, already encoded by the
+  // engine as ctaFlip.pctFromSpot (flip = spot × (1 + pctFromSpot/100)).
+  const distLabel = ctaFlip
+    ? `${ctaFlip.pctFromSpot >= 0 ? '+' : ''}${ctaFlip.pctFromSpot.toFixed(1)}%`
+    : '--'
+  const distColor = ctaFlip?.direction === 'above' ? '#34d399' : '#f87171'
+  const directive = ctaFlip ? executionDirective(regime.isLong, flipLevel) : '—'
+
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-300 font-mono">{label}</span>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono" style={{ color: deltaColor }}>{deltaArrow} {Math.abs(delta).toFixed(0)}pp</span>
-          <span className="font-mono text-sm font-semibold tabular-nums" style={{ color: barColor }}>{exposure > 0 ? '+' : ''}{exposure.toFixed(0)}%</span>
-          {signal === 'exhaustion_risk' && (
-            <span className="text-[12px] font-mono font-bold px-1.5 py-0.5 rounded border animate-pulse" style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.4)', backgroundColor: 'rgba(248,113,113,0.12)', boxShadow: '0 0 8px rgba(248,113,113,0.3)' }}>EXHAUSTION</span>
-          )}
-        </div>
+    <div className="grid grid-cols-12 gap-2 items-center px-2 py-2 border-b border-slate-800/50 hover:bg-slate-800/20 transition-colors">
+      {/* Asset */}
+      <div className="col-span-2 font-mono text-xs font-semibold text-slate-100">{label}</div>
+      {/* Regime */}
+      <div className="col-span-2">
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-mono font-bold tracking-wide whitespace-nowrap"
+          style={{ color: regime.color, borderColor: `${regime.color}55`, backgroundColor: `${regime.color}14` }}
+        >
+          {regime.label}
+        </span>
       </div>
-      {isNegative ? (
-        <div className="relative h-2 bg-[#111827] rounded-full overflow-hidden">
-          <div className="absolute left-1/2 top-0 w-px h-full bg-slate-700 z-10" />
-          <div className="absolute right-1/2 top-0 h-full rounded-l transition-all" style={{ width: `${pctAbs / 2}%`, backgroundColor: barColor, opacity: 0.8 }} />
-        </div>
-      ) : (
-        <div className="relative h-2 bg-[#111827] rounded-full overflow-hidden">
-          {signal === 'exhaustion_risk' && <div className="absolute top-0 w-px h-full bg-red-400/60 z-10" style={{ left: '85%' }} />}
-          <div className="h-full rounded-full transition-all duration-700" style={{ width: `${pctAbs}%`, backgroundColor: barColor, opacity: 0.85 }} />
-        </div>
-      )}
-      <div className="flex justify-between text-[11px] text-slate-400 font-mono">
-        {isNegative ? <><span>−100%</span><span>0%</span><span>+100%</span></> : <><span>0%</span>{signal === 'exhaustion_risk' && <span style={{ color: 'rgba(248,113,113,0.5)' }}>85% ←</span>}<span>100%</span></>}
+      {/* Trail Stop (Flip Price) */}
+      <div className="col-span-2 font-mono text-xs font-semibold tabular-nums text-slate-100">{flipLevel}</div>
+      {/* % Distance to Trigger */}
+      <div className="col-span-1 font-mono text-xs font-semibold tabular-nums" style={{ color: ctaFlip ? distColor : '#64748b' }}>
+        {distLabel}
       </div>
+      {/* Order Execution Directive */}
+      <div className="col-span-5 font-mono text-[11px] text-slate-400 leading-snug">{directive}</div>
     </div>
   )
+}
+
+// ─── Live CTA gauge derivation ─────────────────────────────────────────────────
+//
+// The gauges are derived DIRECTLY from the Systematic & CTA Exposure Engine
+// matrix (/api/market/cta-engine).  Each ETF row carries a 0-100 CFTC
+// positioning percentile and a 50/200d EMA spread; we aggregate those per asset
+// class into a net allocation %, and anchor the CTA flip price to the ETF's OWN
+// live price (e.g. SPY ≈ $580) — never the cash-index level (5,519).
+
+interface CTAEngineRow {
+  asset:            string
+  currentPrice:     number
+  emaSpreadPct:     number
+  ema50vsPricePct:  number
+  positioningScore: number
+}
+
+const clampN = (lo: number, hi: number, v: number) => Math.max(lo, Math.min(hi, v))
+const avgN   = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
+
+// Each gauge maps to the engine ETF rows that compose it; `anchor` is the ETF
+// whose live price the flip level is measured against.
+const GAUGE_GROUPS: { label: string; symbols: string[]; anchor: string }[] = [
+  { label: 'Global Equities', symbols: ['SPY', 'QQQ', 'IWM'], anchor: 'SPY' },
+  { label: 'US Fixed Income', symbols: ['TLT'],               anchor: 'TLT' },
+  { label: 'Commodities',     symbols: ['GLD', 'USO'],        anchor: 'GLD' },
+]
+
+/**
+ * Map the live engine matrix into CTA allocation gauges.  Returns null when no
+ * usable rows exist so the caller can fall back to the static panel.
+ */
+function deriveGaugesFromEngine(rows: CTAEngineRow[]): CTAGaugeRow[] | null {
+  if (!rows.length) return null
+  const byAsset = new Map(rows.map(r => [r.asset, r]))
+
+  const gauges: CTAGaugeRow[] = []
+  for (const group of GAUGE_GROUPS) {
+    const members = group.symbols
+      .map(s => byAsset.get(s))
+      .filter((r): r is CTAEngineRow => !!r && r.currentPrice > 0)
+    if (members.length === 0) continue
+
+    const avgPos = avgN(members.map(m => m.positioningScore))   // 0..100 crowding percentile
+    const avgEma = avgN(members.map(m => m.emaSpreadPct))       // signed 50d-vs-200d %
+    const avgMom = avgN(members.map(m => m.ema50vsPricePct))    // price vs 50d (recent drift)
+
+    // Net allocation: positioning percentile centred at 50 → −100..+100, with
+    // the EMA spread confirming / tilting the trend direction.
+    const posExposure = (avgPos - 50) * 2
+    const emaAdj      = clampN(-15, 15, avgEma * 2)
+    const exposure    = Math.round(clampN(-100, 100, posExposure + emaAdj))
+
+    // Recent-momentum proxy for the W/W delta (price drift off the 50d anchor).
+    const delta        = Math.round(clampN(-20, 20, avgMom))
+    const prevExposure = Math.round(clampN(-100, 100, exposure - delta))
+
+    const signal: CTAGaugeRow['signal'] =
+      avgPos >= 85 && avgEma > 0 ? 'exhaustion_risk' :
+      exposure < 0               ? 'bearish'         :
+      exposure > 70              ? 'bullish'         : 'neutral'
+
+    // CTA flip price anchored to the representative ETF's OWN live price — a
+    // ~4.5% break either flips a long short (below) or covers a short (above).
+    const anchor = byAsset.get(group.anchor)
+    let ctaFlip: CTAFlipMeta | undefined
+    if (anchor && anchor.currentPrice > 0) {
+      const direction: 'below' | 'above' = exposure >= 0 ? 'below' : 'above'
+      const pctFromSpot = direction === 'below' ? -4.5 : 4.5
+      const flipLevel   = anchor.currentPrice * (1 + pctFromSpot / 100)
+      ctaFlip = { level: `$${flipLevel.toFixed(2)}`, pctFromSpot, direction }
+    }
+
+    gauges.push({ label: group.label, exposure, prevExposure, signal, ctaFlip })
+  }
+
+  return gauges.length ? gauges : null
 }
 
 export function CTAGaugesPanel({ gauges }: { gauges: CTAGaugeRow[] }) {
+  // Derive the gauges live from the CTA exposure engine matrix; fall back to the
+  // static `gauges` prop until (or unless) the live feed resolves.
+  const [liveGauges, setLiveGauges] = useState<CTAGaugeRow[] | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const res = await fetch('/api/market/cta-engine', { cache: 'no-store' })
+        if (!res.ok) return
+        const body = await res.json() as { rows?: CTAEngineRow[] }
+        if (!alive) return
+        const derived = deriveGaugesFromEngine(body.rows ?? [])
+        if (derived) setLiveGauges(derived)
+      } catch {
+        /* network error — keep static fallback */
+      }
+    }
+    load()
+    // Same 1h heartbeat as the engine's server cache cadence.
+    const id = setInterval(load, 60 * 60 * 1000)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+
+  const isLive = liveGauges !== null
+  const rows   = liveGauges ?? gauges
+
   return (
-    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 flex flex-col gap-4">
+    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">CTA / Systematic Exposure</h3>
-        <span className="text-[12px] font-mono text-slate-400">Est. % of max allocation</span>
-      </div>
-      <div className="space-y-5">{gauges.map((g) => <CTAGauge key={g.label} row={g} />)}</div>
-      <p className="text-[12px] text-slate-400 font-mono border-t border-[#1a2540] pt-3">
-        Estimated CTA / trend-follower positioning derived from futures open interest and managed-money flows.
-      </p>
-    </div>
-  )
-}
-
-// ─── Ratio Sparkline SVG ──────────────────────────────────────────────────────
-
-function RatioSparkline({ data, color, h = 44 }: { data: number[]; color: string; h?: number }) {
-  const uid = useId()
-  const gid = `rsg${uid.replace(/:/g, '')}`
-  if (data.length < 2) return null
-  const min = Math.min(...data), max = Math.max(...data), rng = max - min || 0.01
-  const pad = 3
-  const pts = data.map((v, i) => ({ x: (i / (data.length - 1)) * 100, y: h - pad - ((v - min) / rng) * (h - pad * 2) }))
-  const line = pts.map((p) => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')
-  const area = `M0,${h} ${pts.map((p) => `L${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')} L100,${h} Z`
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 100 ${h}`} preserveAspectRatio="none" className="overflow-visible">
-      <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%"   stopColor={color} stopOpacity="0.20" />
-          <stop offset="100%" stopColor={color} stopOpacity="0"    />
-        </linearGradient>
-      </defs>
-      <path d={area} fill={`url(#${gid})`} />
-      <polyline points={line} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-      <circle cx={pts[pts.length-1].x} cy={pts[pts.length-1].y} r="2.5" fill={color} vectorEffect="non-scaling-stroke" />
-    </svg>
-  )
-}
-
-// ─── Bottleneck Side Card ─────────────────────────────────────────────────────
-
-const AACORP_YIELD = 5.0
-
-function diliddoFairPE(g: number, r = 5.0): number {
-  return (8.5 + 2 * g) * (4.4 / r)
-}
-
-function marginOfSafety(fairPE: number, actualPE: number): number {
-  if (fairPE <= 0) return 0
-  return ((fairPE - actualPE) / fairPE) * 100
-}
-
-function momentumSignal(return30d: number, return90d: number): { label: string; color: string; detail: string } {
-  const ann30 = return30d * 4
-  const ann90 = return90d * (365 / 90)
-  if (ann30 > ann90 * 1.15) return { label: '▲ ACCELERATING', color: '#34d399', detail: '30d outpacing 90d trend' }
-  if (ann30 < ann90 * 0.85) return { label: '▼ DECELERATING', color: '#f87171', detail: '30d lagging 90d trend' }
-  return { label: '→ STEADY', color: '#94a3b8', detail: 'Consistent momentum' }
-}
-
-function BottleneckSideCard({ side, accentColor, isBreadth }: { side: BottleneckSide; accentColor: string; isBreadth: boolean }) {
-  const [showAll, setShowAll] = useState(false)
-  const displayTickers = showAll ? side.tickers : side.tickers.slice(0, 20)
-  const hasMore = side.tickers.length > 20
-
-  const fairPE   = diliddoFairPE(side.epsGrowthPct, AACORP_YIELD)
-  const mos      = marginOfSafety(fairPE, side.peRatio)
-  const mosColor = mos > 20 ? '#34d399' : mos > 0 ? '#fbbf24' : '#f87171'
-  const momentum = momentumSignal(side.return30dPct, side.return90dPct)
-
-  const diliddoLabel = isBreadth ? 'DiLiddo Breadth P/E' : 'DiLiddo Concentration P/E'
-  const growthLabel = isBreadth ? 'EPS Growth (RSP)' : 'EPS Growth (Top 10)'
-
-  return (
-    <div className="rounded-xl border p-3 space-y-2.5" style={{ borderColor: `${accentColor}22`, backgroundColor: `${accentColor}08` }}>
-      <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <div className="w-1 h-4 rounded-full shrink-0" style={{ backgroundColor: accentColor }} />
-          <span className="text-[10px] font-mono font-semibold uppercase tracking-widest" style={{ color: accentColor }}>{side.label}</span>
+          <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">Systematic Execution Playbook</h3>
+          {isLive
+            ? <StatusBadge variant="live" label="LIVE ENGINE" title="Trail-stop directives derived live from the CTA exposure engine — positioning percentile + 50/200d EMA spread" />
+            : <StatusBadge variant="disconnected" label="SIMULATED" title="Displaying simulated CTA directives — live feed pending" />}
         </div>
-        <span className="text-[12px] font-mono text-slate-400">{side.tickers.length} names</span>
+        <span className="text-[12px] font-mono text-slate-400">Trail-stop directives</span>
       </div>
 
-      <div className="flex flex-wrap gap-1">
-        {displayTickers.map((t) => (
-          <span key={t} className="text-[12px] font-mono px-1.5 py-0.5 rounded border" style={{ color: accentColor, borderColor: `${accentColor}30`, backgroundColor: `${accentColor}10` }}>
-            {t}
-          </span>
-        ))}
-        {hasMore && (
-          <button
-            onClick={() => setShowAll((v) => !v)}
-            className="text-[12px] font-mono px-1.5 py-0.5 rounded border text-slate-300 border-slate-500/40 hover:text-slate-400 transition-colors"
-          >
-            {showAll ? '▲ less' : `+${side.tickers.length - 20} more`}
-          </button>
-        )}
+      {/* ── Column headers ── */}
+      <div className="grid grid-cols-12 gap-2 px-2 text-[10px] font-mono text-slate-600 uppercase tracking-widest">
+        <div className="col-span-2">Asset</div>
+        <div className="col-span-2">Regime</div>
+        <div className="col-span-2">Trail Stop · Flip</div>
+        <div className="col-span-1">Dist</div>
+        <div className="col-span-5">Order Execution Directive</div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 pt-1 border-t border-[#1a2540]">
-        <div className="rounded-lg border border-[#1a2540] bg-[#080d18] p-2 space-y-0.5">
-          <div className="text-[11px] text-slate-400 font-mono uppercase tracking-wider">{diliddoLabel}</div>
-          <div className="flex items-baseline gap-1.5 flex-wrap">
-            <span className="font-mono text-sm font-bold" style={{ color: mosColor }}>{fairPE.toFixed(1)}×</span>
-            <span className="text-[12px] text-slate-300 font-mono">vs {side.peRatio.toFixed(1)}× actual</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <div
-              className="text-[12px] font-mono font-bold px-1.5 py-0.5 rounded border"
-              style={{ color: mosColor, borderColor: `${mosColor}40`, backgroundColor: `${mosColor}12` }}
-            >
-              {mos >= 0 ? '+' : ''}{mos.toFixed(1)}% MOS
-            </div>
-          </div>
-          <div className="text-[11px] text-slate-400 font-mono leading-snug">
-            (8.5+2×{side.epsGrowthPct.toFixed(0)}%)×(4.4/{AACORP_YIELD})
-          </div>
-        </div>
+      {/* ── Rows ── */}
+      <div>{rows.map((g) => <PlaybookRow key={g.label} row={g} />)}</div>
 
-        <div className="rounded-lg border border-[#1a2540] bg-[#080d18] p-2 space-y-0.5">
-          <div className="text-[11px] text-slate-400 font-mono uppercase tracking-wider">Momentum</div>
-          <div className="font-mono text-[11px] font-bold" style={{ color: momentum.color }}>{momentum.label}</div>
-          <div className="text-[12px] text-slate-300 font-mono">{momentum.detail}</div>
-          <div className="flex items-center gap-2 text-[12px] font-mono mt-1">
-            <span className={side.return30dPct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-              30d: {side.return30dPct >= 0 ? '+' : ''}{side.return30dPct.toFixed(1)}%
-            </span>
-            <span className="text-slate-400">|</span>
-            <span className={side.return90dPct >= 0 ? 'text-emerald-400/70' : 'text-red-400/70'}>
-              90d: {side.return90dPct >= 0 ? '+' : ''}{side.return90dPct.toFixed(1)}%
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between pt-1 border-t border-[#1a2540]">
-        <div className="text-[12px] text-slate-400 font-mono">{growthLabel}</div>
-        <div className="font-mono text-sm text-emerald-400">+{side.revenueGrowthPct.toFixed(1)}%</div>
-      </div>
-    </div>
-  )
-}
-
-// ─── Bottleneck Panel ─────────────────────────────────────────────────────────
-
-function BottleneckPanel({ data }: { data: BottleneckData }) {
-  const { breadth, concentration, ratio, ratioTrend, ratioChange30d, sparkline } = data
-  const BREADTH_COLOR       = '#10b981'
-  const CONCENTRATION_COLOR = '#ef4444'
-  const ratioColor = ratioTrend === 'concentration_rising' ? CONCENTRATION_COLOR : ratioTrend === 'breadth_expanding' ? BREADTH_COLOR : '#94a3b8'
-  const ratioLabel = ratioTrend === 'concentration_rising' ? '↗ CONCENTRATION RISING' : ratioTrend === 'breadth_expanding' ? '↘ BREADTH EXPANDING' : '→ BALANCED'
-
-  return (
-    <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">
-          Market Breadth vs. Mega-Cap Concentration · Ratio Analysis
-        </h3>
-        <div className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-lg border" style={{ color: ratioColor, borderColor: `${ratioColor}40`, backgroundColor: `${ratioColor}12` }}>
-          {ratioLabel}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <BottleneckSideCard side={breadth} accentColor={BREADTH_COLOR} isBreadth={true} />
-        <BottleneckSideCard side={concentration} accentColor={CONCENTRATION_COLOR} isBreadth={false} />
-      </div>
-
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-[#1a2540] bg-[#080d18] p-4">
-        <div className="shrink-0">
-          <div className="text-[12px] font-mono text-slate-400 uppercase tracking-widest mb-1">Concentration Ratio</div>
-          <div className="flex items-baseline gap-2.5">
-            <span className="font-mono text-4xl font-bold tabular-nums" style={{ color: ratioColor }}>
-              {ratio.toFixed(2)}<span className="text-2xl">×</span>
-            </span>
-            <div>
-              <div className="font-mono text-xs" style={{ color: ratioChange30d >= 0 ? '#f87171' : '#34d399' }}>
-                {ratioChange30d >= 0 ? '+' : ''}{ratioChange30d.toFixed(2)} 30d
-              </div>
-              <div className="text-[12px] text-slate-400 font-mono">
-                {ratio > 2.0 ? 'Narrowing market' : ratio < 1.5 ? 'Broad participation' : 'Moderate concentration'}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-1 min-w-0 w-full">
-          <div className="text-[12px] font-mono text-slate-400 mb-1">15-Day Trend (SPY/RSP Proxy)</div>
-          <RatioSparkline data={sparkline} color={ratioColor} h={44} />
-        </div>
-
-        <div className="shrink-0 max-w-[220px] border-l border-[#1a2540] pl-4 hidden lg:block">
-          <div className="text-[12px] font-mono text-slate-400 uppercase tracking-widest mb-1">Thesis</div>
-          <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
-            Tracking the velocity of capital concentration in top mega-cap equities relative to broader market participation. Watch for sharp ratio spikes as signals of structural exhaustion, and ratio breakdowns as confirmation of healthy, broad-based bull market participation.
-          </p>
-        </div>
-      </div>
-
-      <p className="text-[12px] text-slate-400 font-mono border-t border-[#1a2540] pt-2">
-        DiLiddo Fair P/E = (8.5 + 2g) × (4.4/r) · Graham-based formula · g = EPS growth % · r = AAA yield {AACORP_YIELD}% · MOS = Margin of Safety
+      <p className="text-[12px] text-slate-400 font-mono border-t border-[#1a2540] pt-3">
+        {isLive
+          ? 'Trail-stop / flip levels anchored to each ETF proxy from the live CTA exposure engine. Distance = live spot vs flip trigger.'
+          : 'Estimated CTA / trend-follower execution levels derived from futures open interest and managed-money flows.'}
       </p>
     </div>
   )
 }
+
 
 // ─── Tech Skew Panel with Search ──────────────────────────────────────────────
 
 const DEFAULT_SKEW_TICKERS = ['NVDA', 'MU', 'SNDK']
 const ALL_TICKERS = Object.keys(SKEW_DB)
 
-function SkewBar({ row }: { row: SkewTicker }) {
+function SkewBar({ row, liveQuote }: { row: SkewTicker; liveQuote?: AlpacaQuote }) {
   const { ticker, callPct, putPct, impliedMove, signal } = row
   const signalConfig = {
     upside_demand: { label: 'UPSIDE DEMAND', color: '#38bdf8',  bg: 'rgba(56,189,248,0.12)',  border: 'rgba(56,189,248,0.35)' },
     balanced:      { label: 'BALANCED',      color: '#94a3b8',  bg: 'rgba(148,163,184,0.08)', border: 'rgba(148,163,184,0.25)' },
     hedging:       { label: 'HEDGING',       color: '#fbbf24',  bg: 'rgba(251,191,36,0.12)',  border: 'rgba(251,191,36,0.35)' },
   }[signal]
+
+  const livePrice = liveQuote?.price
+  const livePct   = liveQuote?.changePercent
+  const priceColor = livePct == null ? '#94a3b8' : livePct > 0 ? '#34d399' : livePct < 0 ? '#f87171' : '#94a3b8'
+
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-sm text-slate-100 font-semibold w-12">{ticker}</span>
+          {livePrice != null && (
+            <span className="font-mono text-[12px] tabular-nums" style={{ color: priceColor }}>
+              {livePrice >= 1000
+                ? livePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                : livePrice.toFixed(2)}
+              {livePct != null && (
+                <span className="ml-1 text-[11px]">
+                  {livePct >= 0 ? '+' : ''}{livePct.toFixed(2)}%
+                </span>
+              )}
+            </span>
+          )}
           <span className="text-[12px] font-mono font-bold px-1.5 py-0.5 rounded border" style={{ color: signalConfig.color, backgroundColor: signalConfig.bg, borderColor: signalConfig.border }}>{signalConfig.label}</span>
         </div>
         <div className="text-[10px] font-mono text-slate-300">±{impliedMove.toFixed(1)}% wk IV</div>
@@ -912,6 +1056,15 @@ export function TechSkewPanel({ skew: _skew }: { skew: SkewTicker[] }) {
   const [open, setOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
+
+  // Live Alpaca quotes for whichever tickers are currently selected
+  const liveSymbols = selected.length > 0 ? selected : DEFAULT_SKEW_TICKERS
+  const { quoteMap } = useAlpacaData({
+    symbols:      liveSymbols,
+    assetClass:   'us_equity',
+    type:         'snapshot',
+    pollInterval: 300_000,
+  })
 
   const suggestions = useMemo(
     () => ALL_TICKERS.filter((t) => t.includes(query.toUpperCase()) && !selected.includes(t)).slice(0, 8),
@@ -940,7 +1093,10 @@ export function TechSkewPanel({ skew: _skew }: { skew: SkewTicker[] }) {
   return (
     <div className="bg-[#0c1221] border border-[#1a2540] rounded-2xl p-4 flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">High-Beta Tech Options Skew</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">High-Beta Tech Options Skew</h3>
+          <StatusBadge variant="disconnected" label="SIMULATED" title="Displaying simulated options skew data — live feed pending" />
+        </div>
         <div className="flex items-center gap-2 text-[12px] font-mono">
           <span style={{ color: 'rgba(251,191,36,0.6)' }}>■ Puts</span>
           <span style={{ color: 'rgba(56,189,248,0.7)' }}>■ Calls</span>
@@ -1001,7 +1157,7 @@ export function TechSkewPanel({ skew: _skew }: { skew: SkewTicker[] }) {
         {displaySkew.length === 0 ? (
           <div className="text-center text-[11px] text-slate-400 font-mono py-4">Search and add tickers above</div>
         ) : (
-          displaySkew.map((s) => <SkewBar key={s.ticker} row={s} />)
+          displaySkew.map((s) => <SkewBar key={s.ticker} row={s} liveQuote={quoteMap.get(s.ticker)} />)
         )}
       </div>
 
@@ -1043,9 +1199,6 @@ export function InstitutionalFlowsSection({ data = FLOWS_MOCK }: InstitutionalFl
         <CTAGaugesPanel gauges={data.ctaGauges} />
         <TechSkewPanel skew={data.techSkew} />
       </div>
-
-      {/* Market Breadth vs Concentration — Secondary Analysis */}
-      <BottleneckPanel data={data.bottleneck} />
     </div>
   )
 }

@@ -113,6 +113,22 @@ export interface PositioningRow {
   accelerationGlyph:     AccelGlyph
   // Divergence signal
   divergenceVector:      'SQUEEZE' | null
+  /**
+   * CONVERGENCE ALARM — fires when the spread between Managed Money and
+   * Commercials reaches a 3-month (13-week) extreme (top or bottom decile).
+   * A large spread means the two most-informed trader classes are at maximum
+   * disagreement, historically a high-conviction leading reversal signal.
+   */
+  convergenceAlarm:      boolean
+  /** Percentile (0–100) of current spread in the 13-week lookback. */
+  spreadPct:             number
+  /**
+   * OI Exhaustion flag — true when managed-money repositioning is large
+   * but overall open interest is falling.  Rising repositioning + falling OI
+   * means existing participants are exiting faster than new money enters:
+   * classic "short covering / exhaustion" signature.
+   */
+  exhaustion:            boolean
   // Commercial / open-interest
   commercialNet:         number
   openInterest:          number
@@ -295,6 +311,38 @@ function buildRow(def: ContractDef, rows: CftcRow[]): PositioningRow {
   const isInverted = (current > 0 && commercialNet < 0) || (current < 0 && commercialNet > 0)
   const divergenceVector: 'SQUEEZE' | null = (isExtreme && isInverted) ? 'SQUEEZE' : null
 
+  // ── CONVERGENCE ALARM ──────────────────────────────────────────────────────
+  // Spread = Managed Money net − Commercial net.  Compute the rolling series
+  // over the most recent 13 weeks (≈ 3 months of weekly CFTC reports) and
+  // check whether the current value is in the top or bottom decile.
+  // A 3-month extreme spread means the two most-informed classes are at maximum
+  // disagreement — historically a reliable leading reversal signal.
+  const COT_LOOKBACK = 13
+  const spreadSeries = rows.slice(0, COT_LOOKBACK).map(r => {
+    const lev  = (parseFloat(r[def.longCol])   || 0) - (parseFloat(r[def.shortCol])   || 0)
+    const comm = (parseFloat(r[def.commLong])  || 0) - (parseFloat(r[def.commShort])  || 0)
+    return lev - comm
+  })
+  const currentSpread = spreadSeries[0] ?? 0
+  const spreadMin     = Math.min(...spreadSeries)
+  const spreadMax     = Math.max(...spreadSeries)
+  const spreadRange   = spreadMax - spreadMin
+  const spreadPct     = spreadRange > 0
+    ? parseFloat(Math.max(0, Math.min(100, ((currentSpread - spreadMin) / spreadRange) * 100)).toFixed(1))
+    : 50
+  const convergenceAlarm = spreadPct < 10 || spreadPct > 90
+
+  // ── OI Exhaustion ──────────────────────────────────────────────────────────
+  // Fires when managed money is actively repositioning (|weeklyChange| is
+  // meaningfully large) but overall open interest is contracting — a sign that
+  // other participants are exiting faster than new money is arriving.
+  // Threshold: weekly repositioning > 3% of the 4-week average absolute net.
+  const avg4wAbsNet = rows.slice(0, 4).reduce((acc, r) => {
+    const net = Math.abs((parseFloat(r[def.longCol]) || 0) - (parseFloat(r[def.shortCol]) || 0))
+    return acc + net
+  }, 0) / Math.min(4, rows.length)
+  const exhaustion = Math.abs(weeklyChange) > avg4wAbsNet * 0.03 && openInterestChange < 0
+
   // Market bias
   const marketBias: 'LONG' | 'SHORT' | 'NEUTRAL' =
     current > 0 ? 'LONG' : current < 0 ? 'SHORT' : 'NEUTRAL'
@@ -314,6 +362,9 @@ function buildRow(def: ContractDef, rows: CftcRow[]): PositioningRow {
     historicalMax:         histMax,
     accelerationGlyph,
     divergenceVector,
+    convergenceAlarm,
+    spreadPct,
+    exhaustion,
     commercialNet,
     openInterest,
     openInterestChange,
@@ -343,6 +394,9 @@ const _m = (
   historicalMin,         historicalMax,
   accelerationGlyph:     '⇅',
   divergenceVector:      null,
+  convergenceAlarm:      false,
+  spreadPct:             50,
+  exhaustion:            false,
   commercialNet:         0,
   openInterest:          0,
   openInterestChange:    0,

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { PositioningRow, MacroPositioningData, AccelGlyph } from '@/app/api/macro-positioning/route'
+import { StatusBadge } from '@/components/dashboard/StatusBadge'
 
 // ─── Section structure ────────────────────────────────────────────────────────
 // Four macro buckets: BTC merged into CURRENCY alongside DX/6E/6J/6A/6C
@@ -228,52 +229,125 @@ function VelocityTooltip() {
   )
 }
 
-function TriggerTooltip() {
+function CommDeltaTooltip() {
   return (
-    <TooltipShell title="Divergence Signal" align="right">
-      <div className="flex items-start gap-2.5">
-        <div className="shrink-0 mt-0.5">
-          <div className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border text-[11px] font-mono font-bold" style={{ backgroundColor: '#fbbf2410', borderColor: '#fbbf2450', color: '#fbbf24' }}>
-            ⚡ REVERSAL SQUEEZE
-          </div>
-        </div>
-      </div>
-      <p className="text-[11px] font-mono text-slate-400 leading-snug">
-        Fires when <span className="text-slate-300">COT Index is at a multi-year extreme</span> (&lt;10% or &gt;90%) AND <span className="text-slate-300">commercials are positioned opposite</span> leveraged funds.
-      </p>
+    <TooltipShell title="Net Commercial Positioning" align="left" width="w-[300px]">
+      <TRow
+        glyph="+XK"
+        glyphColor="#34d399"
+        label="Net Long Commercials"
+        desc={<>Producers/merchants or dealers are net long.<br /><span className="text-slate-300">Unusual — they are natural sellers. Signals supply reduction or hedging unwind.</span></>}
+      />
       <TDivider />
-      <p className="text-[11px] font-mono text-slate-400 leading-snug">
-        Strategy: <span className="text-slate-300">Contrarian fade.</span> The crowd is maximally one-sided while informed hedgers lean the other way — historically a high-probability mean-reversion setup.
-      </p>
+      <TRow
+        glyph="−XK"
+        glyphColor="#f87171"
+        label="Net Short Commercials"
+        desc={<>Producers/merchants hedging future production (commodities) or dealers hedging inventory (financial). <span className="text-slate-300">Normal operating posture.</span></>}
+      />
       <TDivider />
-      <p className="text-[10px] font-mono text-slate-600">— = No active setup. Position within historical norms.</p>
+      <p className="text-[10px] font-mono text-slate-600 leading-relaxed">
+        TFF contracts: Dealer/Intermediary net. Disaggregated: Producer/Merchant net.
+        Commercials are the most informed participants — they trade on fundamental supply/demand.
+      </p>
+    </TooltipShell>
+  )
+}
+
+function OverhangTooltip() {
+  return (
+    <TooltipShell title="Leveraged Fund Overhang %" align="left" width="w-[300px]">
+      <TRow
+        glyph=">25%"
+        glyphColor="#f87171"
+        label="High Overhang — Crowded"
+        desc="Leveraged funds control >25% of total open interest. Trade is crowded; any sentiment shift may trigger outsized unwinding."
+      />
+      <TDivider />
+      <TRow
+        glyph="10–25%"
+        glyphColor="#fbbf24"
+        label="Moderate Overhang"
+        desc="Meaningful leveraged positioning relative to the overall market. Monitor for acceleration that pushes into the high zone."
+      />
+      <TDivider />
+      <TRow
+        glyph="<10%"
+        glyphColor="#475569"
+        label="Low Overhang — Dispersed"
+        desc="Leveraged funds are a small fraction of open interest. Market is broadly held; crowding risk is low."
+      />
+      <TDivider />
+      <p className="text-[10px] font-mono text-slate-600 leading-relaxed">
+        Formula: |Leveraged Net| ÷ Total Open Interest × 100.
+        Source: CFTC COT weekly report.
+      </p>
+    </TooltipShell>
+  )
+}
+
+function RegimeTooltip() {
+  return (
+    <TooltipShell title="COT Regime Classification" align="right" width="w-[320px]">
+      <TRow
+        glyph={<span style={{ color: '#34d399', fontSize: 9 }}>BULL EXP.</span>}
+        glyphColor="#34d399"
+        label="BULL EXPANSION"
+        desc="Managed money accumulating net longs with conviction. Both net position and weekly flow point higher — trend-following long entry conditions."
+      />
+      <TDivider />
+      <TRow
+        glyph={<span style={{ color: '#f87171', fontSize: 9 }}>BEAR CON.</span>}
+        glyphColor="#f87171"
+        label="BEAR CONTRACTION"
+        desc="Managed money distributing and adding net shorts. Net position negative and weekly flow negative — trend-following short entry conditions."
+      />
+      <TDivider />
+      <TRow
+        glyph={<span style={{ color: '#fbbf24', fontSize: 9 }}>SQ.</span>}
+        glyphColor="#fbbf24"
+        label="SHORT SQUEEZE"
+        desc="Forced covering; violent reversal potential. Extreme COT index with commercial inversion, or 3-month MM/Commercial spread extreme — contrarian fade setup."
+      />
+      <TDivider />
+      <TRow
+        glyph={<span style={{ color: '#64748b', fontSize: 9 }}>—</span>}
+        glyphColor="#64748b"
+        label="NEUTRAL"
+        desc="No dominant directional positioning from leveraged funds. Net position and weekly flow are mixed — no structural edge from COT data."
+      />
     </TooltipShell>
   )
 }
 
 // ─── Column header cell ───────────────────────────────────────────────────────
 
-type ColDef = { label: string; tooltip?: React.ReactNode }
+type ColDef = { label: string; sub?: string; tooltip?: React.ReactNode }
 
+// 6 columns — WK/WK folded as a sub-line under MM NET to reclaim a full column
 const COL_DEFS: ColDef[] = [
-  { label: 'ASSET'             },
-  { label: 'LEV. FUNDS NET',    tooltip: <LevFundsTooltip />    },
-  { label: 'WK/WK CHANGE',      tooltip: <WkChangeTooltip />    },
-  { label: 'POSITIONING SCALE', tooltip: <ScaleTooltip />       },
-  { label: '1W VELOCITY',       tooltip: <VelocityTooltip />    },
-  { label: 'TRIGGER',           tooltip: <TriggerTooltip />     },
+  { label: 'ASSET'                                                               },
+  { label: 'MM NET',    sub: 'wk Δ',  tooltip: <LevFundsTooltip />             },
+  { label: 'COMM.',     sub: 'delta', tooltip: <CommDeltaTooltip />             },
+  { label: 'OVERHANG',  sub: '%OI',   tooltip: <OverhangTooltip />             },
+  { label: 'POSITIONING SCALE',        tooltip: <ScaleTooltip />                },
+  { label: 'VEL.',      sub: '1w',    tooltip: <VelocityTooltip />             },
+  { label: 'REGIME',                   tooltip: <RegimeTooltip />               },
 ]
 
-function ColHeader({ label, tooltip }: ColDef) {
-  if (!tooltip) {
-    return <div className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.18em]">{label}</div>
-  }
+function ColHeader({ label, sub, tooltip }: ColDef) {
+  const inner = (
+    <div className="flex items-baseline gap-1 leading-none">
+      <span className="text-[10px] font-mono text-slate-400 uppercase tracking-[0.18em]">{label}</span>
+      {sub && <span className="text-[9px] font-mono text-slate-600 uppercase tracking-[0.1em]">{sub}</span>}
+    </div>
+  )
+  if (!tooltip) return inner
   return (
     <div className="relative group flex items-center gap-1 cursor-default select-none">
-      <span className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.18em]">{label}</span>
-      {/* Info icon — dims to 40% opacity at rest, full on hover */}
+      {inner}
       <svg
-        className="w-2.5 h-2.5 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity"
+        className="w-2.5 h-2.5 shrink-0 opacity-30 group-hover:opacity-80 transition-opacity"
         style={{ color: '#64748b' }}
         fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
       >
@@ -343,17 +417,129 @@ function PositioningBar({ positioningScale, zeroLinePosition }: {
   )
 }
 
-// ─── Trigger badge ────────────────────────────────────────────────────────────
+// ─── Regime classification ────────────────────────────────────────────────────
+//
+// Four mutually exclusive regimes derived from existing PositioningRow fields.
+// SHORT SQUEEZE takes priority because it overrides directional bias entirely.
 
-function TriggerBadge({ squeeze }: { squeeze: 'SQUEEZE' | null }) {
-  if (!squeeze) return <span className="text-slate-600 font-mono text-[11px]">—</span>
+type Regime = 'BULL_EXPANSION' | 'BEAR_CONTRACTION' | 'SHORT_SQUEEZE' | 'NEUTRAL'
+
+const REGIME_META: Record<Regime, {
+  label:   string
+  color:   string
+  bg:      string
+  border:  string
+  glow?:   string
+  desc:    string
+}> = {
+  BULL_EXPANSION: {
+    label:  'BULL EXPANSION',
+    color:  '#34d399',
+    bg:     '#34d39912',
+    border: '#34d39940',
+    glow:   '#34d39918',
+    desc:   'Managed money accumulating net longs with conviction. Net position positive and weekly flow positive — trend-following long entry conditions present.',
+  },
+  BEAR_CONTRACTION: {
+    label:  'BEAR CONTRACTION',
+    color:  '#f87171',
+    bg:     '#f8717112',
+    border: '#f8717140',
+    desc:   'Managed money distributing and adding net shorts. Net position negative and weekly flow negative — trend-following short entry conditions present.',
+  },
+  SHORT_SQUEEZE: {
+    label:  'SHORT SQUEEZE',
+    color:  '#fbbf24',
+    bg:     '#fbbf2412',
+    border: '#fbbf2445',
+    glow:   '#fbbf2420',
+    desc:   'Forced covering; violent reversal potential. Extreme COT positioning with commercial inversion, or 3-month MM/Commercial spread at an extreme — high-probability contrarian fade setup.',
+  },
+  NEUTRAL: {
+    label:  'NEUTRAL',
+    color:  '#475569',
+    bg:     'transparent',
+    border: '#1e293b',
+    desc:   'No dominant directional positioning from leveraged funds. Net position and weekly flow are mixed or flat — no structural COT edge in either direction.',
+  },
+}
+
+function classifyRegime(row: PositioningRow): Regime {
+  // Squeeze signals override all directional reads
+  if (row.divergenceVector === 'SQUEEZE' || row.convergenceAlarm) return 'SHORT_SQUEEZE'
+  // Conviction long: net long AND still adding this week
+  if (row.leveragedNet > 0 && row.weeklyChange > 0) return 'BULL_EXPANSION'
+  // Conviction short: net short AND still adding shorts this week
+  if (row.leveragedNet < 0 && row.weeklyChange < 0) return 'BEAR_CONTRACTION'
+  return 'NEUTRAL'
+}
+
+// ─── Regime badge ─────────────────────────────────────────────────────────────
+// Compact coloured label + inline ? icon whose popover shows the full description.
+// The ? is always present but only visible (opacity) on hover so it stays clean.
+
+function RegimeBadge({ row }: { row: PositioningRow }) {
+  const regime = classifyRegime(row)
+  const meta   = REGIME_META[regime]
+
+  return (
+    <div className="flex items-center gap-1 min-w-0">
+      {/* Coloured label chip */}
+      <div
+        className="inline-flex items-center px-1.5 py-0.5 rounded border shrink-0"
+        style={{
+          backgroundColor: meta.bg,
+          borderColor:     meta.border,
+          boxShadow:       meta.glow ? `0 0 6px ${meta.glow}` : undefined,
+        }}
+      >
+        <span
+          className="text-[10px] font-mono font-bold tracking-widest uppercase leading-none"
+          style={{ color: meta.color }}
+        >
+          {meta.label}
+        </span>
+      </div>
+
+      {/* ? icon — inline hover tooltip with full description */}
+      <div className="relative group shrink-0">
+        <span className="text-[10px] font-mono text-slate-700 group-hover:text-slate-400 transition-colors cursor-help select-none leading-none">
+          ?
+        </span>
+        {/* Popover */}
+        <div className="absolute bottom-full right-0 mb-2 w-[230px] z-[200] invisible group-hover:visible opacity-0 group-hover:opacity-100 transition-all duration-150 pointer-events-none">
+          {/* Arrow */}
+          <div className="absolute -bottom-1.5 right-1 w-3 h-3 rotate-45 bg-slate-900 border-r border-b border-slate-700/60" />
+          <div className="bg-slate-900 border border-slate-700/60 rounded-lg shadow-2xl overflow-hidden">
+            <div className="px-2.5 py-1 border-b border-slate-800 flex items-center gap-1.5">
+              <span
+                className="text-[9px] font-mono font-bold uppercase tracking-widest"
+                style={{ color: meta.color }}
+              >
+                {meta.label}
+              </span>
+            </div>
+            <p className="px-2.5 py-2 text-[11px] font-mono text-slate-400 leading-relaxed">
+              {meta.desc}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── OI Exhaustion badge ──────────────────────────────────────────────────────
+// Rendered inline next to the Lev. Funds Net value when exhaustion is detected.
+
+function OIExhaustionBadge() {
   return (
     <div
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border"
-      style={{ backgroundColor: '#fbbf2410', borderColor: '#fbbf2450', boxShadow: '0 0 8px #fbbf2420' }}
+      title="OI Exhaustion: active repositioning + falling open interest — short covering / position unwind"
+      className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[8px] font-mono font-bold uppercase tracking-wider ml-1 cursor-help"
+      style={{ backgroundColor: '#f97316' + '18', borderWidth: 1, borderStyle: 'solid', borderColor: '#f97316' + '50', color: '#f97316' }}
     >
-      <span className="text-[10px]">⚡</span>
-      <span className="text-[12px] font-mono font-bold text-amber-400 tracking-wider uppercase">REVERSAL SQUEEZE</span>
+      OI↓
     </div>
   )
 }
@@ -363,17 +549,19 @@ function TriggerBadge({ squeeze }: { squeeze: 'SQUEEZE' | null }) {
 function DataBadge({ status }: { status: MacroPositioningData['status'] | undefined }) {
   if (status === 'AUTHENTICATED') {
     return (
-      <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md border shrink-0" style={{ borderColor:'#34d39960', backgroundColor:'#34d39912' }}>
-        <span className="w-1.5 h-1.5 rounded-full inline-block shrink-0" style={{ backgroundColor:'#34d399', boxShadow:'0 0 6px #34d399, 0 0 12px #34d39980' }} />
-        <span className="text-[11px] font-mono font-bold text-emerald-400 tracking-widest uppercase">LIVE · CFTC</span>
-      </div>
+      <StatusBadge
+        variant="live"
+        label="LIVE · CFTC"
+        title="Live CFTC Commitments of Traders data"
+      />
     )
   }
   return (
-    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md border shrink-0" style={{ borderColor:'#fbbf2460', backgroundColor:'#fbbf2410' }}>
-      <span className="w-1.5 h-1.5 rounded-full border inline-block shrink-0" style={{ borderColor:'#fbbf24' }} />
-      <span className="text-[11px] font-mono font-bold text-amber-400 tracking-widest uppercase">DEMO / FALLBACK</span>
-    </div>
+    <StatusBadge
+      variant="disconnected"
+      label="DEMO DATA"
+      title="Add CFTC credentials to .env.local to enable live data"
+    />
   )
 }
 
@@ -382,7 +570,8 @@ function DataBadge({ status }: { status: MacroPositioningData['status'] | undefi
 function AccordionDrawer({ row }: { row: PositioningRow }) {
   const commColor = row.commercialNet >= 0 ? '#34d399' : '#f87171'
   const oiColor   = row.openInterestChange >= 0 ? '#34d399' : '#f87171'
-  const biasColor = row.marketBias === 'LONG' ? '#34d399' : row.marketBias === 'SHORT' ? '#f87171' : '#fbbf24'
+  const regime    = classifyRegime(row)
+  const regimeMeta = REGIME_META[regime]
 
   return (
     <div className="px-5 pt-3 pb-4 bg-[#06091566] border-t border-[#1a2540]/40">
@@ -402,9 +591,16 @@ function AccordionDrawer({ row }: { row: PositioningRow }) {
           </div>
         </div>
         <div>
-          <div className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.18em] mb-1">MARKET BIAS</div>
-          <div className="text-[13px] font-mono font-bold" style={{ color: biasColor }}>{row.marketBias}</div>
-          <div className="text-[10px] font-mono text-slate-600 mt-0.5">lev fund direction</div>
+          <div className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.18em] mb-1">COT REGIME</div>
+          <div
+            className="text-[11px] font-mono font-bold uppercase tracking-wider"
+            style={{ color: regimeMeta.color }}
+          >
+            {regimeMeta.label}
+          </div>
+          <div className="text-[10px] font-mono text-slate-600 mt-0.5">
+            spread {row.spreadPct.toFixed(0)}th %ile
+          </div>
         </div>
         <div>
           <div className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.18em] mb-1">CFTC DATE</div>
@@ -436,9 +632,121 @@ function SectionHeader({ category, count }: { category: Category; count: number 
   )
 }
 
+// ─── Sector Breadth module ────────────────────────────────────────────────────
+//
+// Aggregates directional bias by macro category using ALL rows (not the filtered
+// view) so the summary always reflects the full COT universe.
+// Placed between the scrollable body and the footer.
+
+function SectorBreadth({ rows }: { rows: PositioningRow[] }) {
+  const grouped = useMemo(() => {
+    const map: Partial<Record<Category, PositioningRow[]>> = {}
+    for (const row of rows) {
+      if (!map[row.category]) map[row.category] = []
+      map[row.category]!.push(row)
+    }
+    return map
+  }, [rows])
+
+  return (
+    <div className="px-4 py-3 border-t border-[#1a2540] bg-[#060915]/50 shrink-0">
+      <div className="flex items-center gap-2 mb-2.5">
+        <span className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.2em]">
+          SECTOR BREADTH
+        </span>
+        <div className="h-px flex-1 bg-[#1a2540]" />
+        <span className="text-[10px] font-mono text-slate-700 uppercase tracking-widest">
+          MACRO BIAS
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+        {SECTION_ORDER.map(cat => {
+          const catRows = grouped[cat] ?? []
+          if (catRows.length === 0) return null
+
+          const meta         = SECTION_META[cat]
+          const longCount    = catRows.filter(r => r.leveragedNet > 0).length
+          const shortCount   = catRows.filter(r => r.leveragedNet < 0).length
+          const totalCount   = catRows.length
+          const squeezeCount = catRows.filter(r => r.convergenceAlarm || r.divergenceVector === 'SQUEEZE').length
+          const avgScale     = catRows.reduce((sum, r) => sum + r.positioningScale, 0) / totalCount
+          const longPct      = totalCount > 0 ? (longCount / totalCount) * 100 : 50
+
+          let biasLabel: string
+          let biasColor: string
+          if      (longCount > shortCount) { biasLabel = 'NET LONG';  biasColor = '#34d399' }
+          else if (shortCount > longCount) { biasLabel = 'NET SHORT'; biasColor = '#f87171' }
+          else                             { biasLabel = 'MIXED';     biasColor = '#94a3b8' }
+
+          return (
+            <div
+              key={cat}
+              className="rounded-lg border px-3 py-2.5"
+              style={{ backgroundColor: meta.bg, borderColor: meta.border }}
+            >
+              {/* Category label + bias */}
+              <div className="flex items-center justify-between mb-2">
+                <span
+                  className="text-[10px] font-mono font-bold uppercase tracking-wider"
+                  style={{ color: meta.text }}
+                >
+                  {meta.label}
+                </span>
+                <span
+                  className="text-[10px] font-mono font-bold uppercase tracking-widest"
+                  style={{ color: biasColor }}
+                >
+                  {biasLabel}
+                </span>
+              </div>
+
+              {/* Long/Short proportion bar */}
+              <div
+                className="h-1.5 rounded-full overflow-hidden mb-2"
+                style={{ backgroundColor: '#f8717128' }}
+              >
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{ width: `${longPct}%`, backgroundColor: '#34d399' }}
+                />
+              </div>
+
+              {/* Stats row */}
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                <span className="text-slate-500">
+                  <span style={{ color: '#34d399cc' }}>{longCount}L</span>
+                  {' / '}
+                  <span style={{ color: '#f87171cc' }}>{shortCount}S</span>
+                </span>
+                <span className="text-slate-600">
+                  avg {avgScale.toFixed(0)}
+                  <span className="text-slate-700">%ile</span>
+                </span>
+                {squeezeCount > 0 ? (
+                  <span
+                    className="font-bold"
+                    style={{ color: '#fbbf24' }}
+                    title={`${squeezeCount} contract${squeezeCount > 1 ? 's' : ''} in SHORT SQUEEZE regime`}
+                  >
+                    {squeezeCount} SQ
+                  </span>
+                ) : (
+                  <span className="text-slate-700">—</span>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ─── Main panel ───────────────────────────────────────────────────────────────
 
-const GRID_COLS = '11rem 6.5rem 6.5rem 1fr 5.5rem 9rem'
+// 7 columns: Asset | MM Net (+ wk Δ sub) | Comm Delta | Overhang %OI | Scale | Velocity | Regime
+const GRID_COLS = '11rem 7rem 5.5rem 4rem 1fr 4.5rem 10rem'
 
 export function MacroPositioningPanel() {
   const [data,           setData]           = useState<MacroPositioningData | null>(null)
@@ -446,6 +754,7 @@ export function MacroPositioningPanel() {
   const [activeFilter,   setActiveFilter]   = useState<string>('indexes')  // default: INDEXES
   const [searchText,     setSearchText]     = useState('')
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null)
+  const [showCommFlow,   setShowCommFlow]   = useState(false)
 
   // ── Data fetch ───────────────────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
@@ -494,17 +803,17 @@ export function MacroPositioningPanel() {
       {/* ── Header ────────────────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-[#1a2540] shrink-0">
         <div>
-          <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">
-            CFTC / COT — Institutional Positioning Matrix
-          </h3>
-          <p className="text-[12px] text-slate-500 font-mono mt-0.5">
-            Leveraged fund net · 3-yr percentile · 1-week velocity · divergence signal
+          <div className="flex items-baseline gap-2.5 flex-wrap">
+            <h3 className="text-[10px] font-mono text-amber-400/80 uppercase tracking-widest">
+              CFTC / COT — Institutional Positioning
+            </h3>
+            <span className="text-[10px] font-mono text-slate-600">3-yr scale · 13-wk extreme · weekly CFTC</span>
             {data?.timestamp && (
-              <span className="ml-2 text-slate-600">
-                · refreshed {new Date(data.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+              <span className="text-[10px] font-mono text-slate-700">
+                · {new Date(data.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
               </span>
             )}
-          </p>
+          </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <DataBadge status={data?.status} />
@@ -557,6 +866,19 @@ export function MacroPositioningPanel() {
           )}
         </div>
 
+        {/* Commercial Flow toggle */}
+        <button
+          onClick={() => setShowCommFlow(v => !v)}
+          className="text-[11px] font-mono px-2.5 py-0.5 rounded-md border transition-all duration-150 uppercase tracking-wider font-bold whitespace-nowrap"
+          style={showCommFlow
+            ? { backgroundColor: '#f59e0b15', color: '#fbbf24', borderColor: '#f59e0b40', boxShadow: '0 0 8px #f59e0b20' }
+            : { backgroundColor: 'transparent', color: '#475569', borderColor: '#1e293b' }
+          }
+          title="Highlight rows where commercials oppose leveraged funds"
+        >
+          {showCommFlow ? '↕ COMM FLOW ON' : '↕ COMM FLOW'}
+        </button>
+
         {data && (
           <span className="ml-auto text-[11px] font-mono text-slate-600 shrink-0">
             {data.liveCount}/{data.totalCount} live
@@ -581,8 +903,8 @@ export function MacroPositioningPanel() {
         {isLoading && !data ? (
           <div>
             {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="grid px-4 py-3 border-b border-[#1a2540]/50 animate-pulse" style={{ gridTemplateColumns: GRID_COLS }}>
-                {Array.from({ length: 6 }).map((_, j) => (
+              <div key={i} className="grid px-4 py-2.5 border-b border-[#1a2540]/50 animate-pulse" style={{ gridTemplateColumns: GRID_COLS }}>
+                {Array.from({ length: 7 }).map((_, j) => (
                   <div key={j} className="h-4 bg-[#1a2540] rounded w-3/4" />
                 ))}
               </div>
@@ -602,18 +924,36 @@ export function MacroPositioningPanel() {
 
                 <div className="divide-y divide-[#1a2540]/40">
                   {rows.map((row, idx) => {
-                    const meta     = SECTION_META[row.category as Category] ?? SECTION_META.commodity
-                    const velStyle = VELOCITY_STYLE[row.accelerationGlyph]
-                    const netColor = row.leveragedNet >= 0 ? '#34d399' : '#f87171'
-                    const chgColor = row.weeklyChange  >= 0 ? '#34d399' : '#f87171'
+                    const meta       = SECTION_META[row.category as Category] ?? SECTION_META.commodity
+                    const velStyle   = VELOCITY_STYLE[row.accelerationGlyph]
+                    const netColor   = row.leveragedNet >= 0 ? '#34d399' : '#f87171'
+                    const chgColor   = row.weeklyChange  >= 0 ? '#34d399' : '#f87171'
+                    const commColor  = row.commercialNet >= 0 ? '#34d399' : '#f87171'
                     const isExpanded = expandedSymbol === row.symbol
 
+                    // Commercial Flow: commercials opposing leveraged funds?
+                    const isOpposed = (row.leveragedNet > 0 && row.commercialNet < 0) ||
+                                      (row.leveragedNet < 0 && row.commercialNet > 0)
+
+                    // Overhang %OI
+                    const overhangPct = row.openInterest > 0
+                      ? (Math.abs(row.leveragedNet) / row.openInterest) * 100
+                      : null
+                    const overhangColor = overhangPct === null   ? '#475569'
+                      : overhangPct > 25                         ? '#f87171'
+                      : overhangPct > 10                         ? '#fbbf24'
+                      :                                            '#475569'
+
                     return (
-                      <div key={row.symbol ?? idx} className={`transition-colors ${isExpanded ? 'bg-[#0d1629]/80' : ''}`}>
+                      <div
+                        key={row.symbol ?? idx}
+                        className={`transition-colors ${isExpanded ? 'bg-[#0d1629]/80' : ''} ${showCommFlow && isOpposed ? 'border-l-2' : ''}`}
+                        style={showCommFlow && isOpposed ? { borderLeftColor: '#f59e0b80' } : undefined}
+                      >
 
                         {/* Main row */}
                         <div
-                          className="grid px-4 py-2.5 cursor-pointer hover:bg-[#0d1629]/60 transition-colors"
+                          className="grid px-4 py-2 cursor-pointer hover:bg-[#0d1629]/60 transition-colors"
                           style={{ gridTemplateColumns: GRID_COLS }}
                           onClick={() => setExpandedSymbol(isExpanded ? null : row.symbol)}
                         >
@@ -621,62 +961,90 @@ export function MacroPositioningPanel() {
                           {/* ASSET */}
                           <div className="flex items-center gap-2 min-w-0 pr-2">
                             <svg
-                              className="w-2.5 h-2.5 shrink-0 transition-transform duration-200"
+                              className="w-2 h-2 shrink-0 transition-transform duration-200"
                               style={{ color: '#334155', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
                               fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
                             >
                               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                             </svg>
                             <div
-                              className="shrink-0 px-1.5 py-0.5 rounded text-[12px] font-mono font-bold uppercase tracking-wider border"
+                              className="shrink-0 px-1.5 py-0.5 rounded text-[11px] font-mono font-bold uppercase tracking-wider border"
                               style={{ color: meta.text, borderColor: meta.border, backgroundColor: meta.bg }}
                             >
                               {row.symbol}
                             </div>
                             <div className="min-w-0">
-                              <div className="text-[10px] text-slate-200 font-mono truncate leading-tight">{row.label}</div>
+                              <div className="text-[10px] text-slate-300 font-mono truncate leading-tight">{row.label}</div>
                             </div>
                           </div>
 
-                          {/* LEV. FUNDS NET */}
-                          <div className="flex flex-col justify-center">
-                            <span className="text-[13px] font-mono font-bold tabular-nums leading-tight" style={{ color: netColor }}>
-                              {row.leveragedNetFormatted}
-                            </span>
-                          </div>
-
-                          {/* WK/WK CHANGE */}
-                          <div className="flex flex-col justify-center">
-                            <span className="text-[11px] font-mono font-semibold tabular-nums" style={{ color: chgColor }}>
+                          {/* MM NET  +  wk Δ sub-line  +  OI exhaustion badge */}
+                          <div className="flex flex-col justify-center gap-0.5">
+                            <div className="flex items-center gap-1">
+                              <span className="text-[12px] font-mono font-bold tabular-nums leading-none" style={{ color: netColor }}>
+                                {row.leveragedNetFormatted}
+                              </span>
+                              {row.exhaustion && <OIExhaustionBadge />}
+                            </div>
+                            <span className="text-[10px] font-mono tabular-nums leading-none" style={{ color: chgColor + 'aa' }}>
                               {row.weeklyChangeFormatted}
                             </span>
                           </div>
 
-                          {/* POSITIONING SCALE */}
-                          <div className="flex flex-col justify-center gap-1 pr-4">
-                            <PositioningBar positioningScale={row.positioningScale} zeroLinePosition={row.zeroLinePosition} />
-                            <div className="flex items-center justify-between text-[10px] font-mono tabular-nums">
-                              <span className="text-red-900/80">◀ SHORT</span>
-                              <span style={{ color: row.positioningScale >= row.zeroLinePosition ? '#34d399' : '#f87171' }}>
-                                {row.positioningScale.toFixed(1)}%
+                          {/* COMM. DELTA */}
+                          <div className="flex flex-col justify-center gap-0.5">
+                            <span
+                              className="text-[12px] font-mono font-semibold tabular-nums leading-none"
+                              style={{ color: commColor }}
+                            >
+                              {fmtKClient(row.commercialNet)}
+                            </span>
+                            {showCommFlow && isOpposed && (
+                              <span
+                                className="text-[9px] font-mono font-bold uppercase tracking-wider leading-none"
+                                style={{ color: '#fbbf24' }}
+                              >
+                                ↕ OPP
                               </span>
-                              <span className="text-emerald-900/80">LONG ▶</span>
+                            )}
+                          </div>
+
+                          {/* OVERHANG %OI */}
+                          <div className="flex flex-col justify-center">
+                            {overhangPct !== null ? (
+                              <span
+                                className="text-[12px] font-mono font-semibold tabular-nums"
+                                style={{ color: overhangColor }}
+                              >
+                                {overhangPct.toFixed(1)}%
+                              </span>
+                            ) : (
+                              <span className="text-[12px] font-mono text-slate-600">—</span>
+                            )}
+                          </div>
+
+                          {/* POSITIONING SCALE — bar + centred percentile only */}
+                          <div className="flex flex-col justify-center gap-1 pr-3">
+                            <PositioningBar positioningScale={row.positioningScale} zeroLinePosition={row.zeroLinePosition} />
+                            <div className="text-center text-[10px] font-mono tabular-nums"
+                              style={{ color: row.positioningScale >= row.zeroLinePosition ? '#34d399cc' : '#f87171cc' }}>
+                              {row.positioningScale.toFixed(0)}%
                             </div>
                           </div>
 
-                          {/* 1W VELOCITY */}
+                          {/* VELOCITY */}
                           <div className="flex items-center">
                             <span
-                              className="text-[16px] font-mono leading-none"
+                              className="text-[15px] font-mono leading-none"
                               style={{ color: velStyle.color, textShadow: velStyle.glow ? `0 0 8px ${velStyle.glow}` : undefined }}
                             >
                               {row.accelerationGlyph}
                             </span>
                           </div>
 
-                          {/* TRIGGER */}
+                          {/* REGIME */}
                           <div className="flex items-center">
-                            <TriggerBadge squeeze={row.divergenceVector} />
+                            <RegimeBadge row={row} />
                           </div>
 
                         </div>
@@ -694,10 +1062,16 @@ export function MacroPositioningPanel() {
         )}
       </div>
 
+      {/* ── Sector Breadth ────────────────────────────────────────────────────── */}
+      {data && data.rows.length > 0 && <SectorBreadth rows={data.rows} />}
+
       {/* ── Footer ────────────────────────────────────────────────────────────── */}
       <div className="px-4 py-2 border-t border-[#1a2540] bg-[#080d18]/40 flex items-center justify-between gap-2 flex-wrap shrink-0">
-        <p className="text-[11px] font-mono text-slate-600">
-          ⚡ REVERSAL SQUEEZE = COT Index at multi-year extreme (&lt;10% or &gt;90%) with commercials positioned opposite leveraged funds.
+        <p className="text-[10px] font-mono text-slate-700">
+          <span style={{ color: '#34d39960' }}>■</span> BULL EXPANSION &nbsp;·&nbsp;
+          <span style={{ color: '#f8717160' }}>■</span> BEAR CONTRACTION &nbsp;·&nbsp;
+          <span style={{ color: '#fbbf2460' }}>■</span> SHORT SQUEEZE = forced covering &nbsp;·&nbsp;
+          <span style={{ color: '#f9731660' }}>OI↓</span> = exhaustion
         </p>
         {data?.liveCount != null && (
           <span className="text-[11px] font-mono text-slate-600 shrink-0">

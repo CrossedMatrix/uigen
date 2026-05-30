@@ -16,17 +16,17 @@ export interface LivenessMetrics {
   ageSeconds: number        // How old is current data (now - lastUpdateMs)
   isMarketOpen: boolean
   feedHealthPercent: number // 0-100; 100 = all sources healthy
-  dataSource: 'yahoo' | 'fred' | 'fallback'
+  dataSource: 'alpaca' | 'fred' | 'fallback'
   message: string           // Human-readable status message
 }
 
 // ─── Data Sources ────────────────────────────────────────────────────────────
 
-export type DataSourceType = 'yahoo-finance' | 'fred' | 'mock' | 'cache'
+export type DataSourceType = 'alpaca' | 'fred' | 'mock' | 'cache'
 
 export interface DataSource {
   type: DataSourceType
-  symbol: string           // Yahoo Finance ticker or FRED series ID
+  symbol: string           // Provider ticker or FRED series ID
   priority: number         // 1 = primary, 2 = secondary, 3 = fallback
   refreshIntervalMs: number // How often this source should be polled
   maxAgeMs: number        // Data older than this is considered stale
@@ -89,7 +89,7 @@ export interface MarketDataSnapshot {
 
   // Source-level diagnostics
   sources: {
-    yahoo: {
+    alpaca: {
       healthy: boolean
       lastSuccessMs: number
       lastErrorMs?: number
@@ -113,14 +113,14 @@ export interface MarketRegistryConfig {
 
   // Data source configuration
   primarySource: {
-    type: 'yahoo-finance' | 'fred'
+    type: 'alpaca' | 'fred'
     symbol: string
     refreshIntervalMs: number
     maxAgeMs: number
   }
 
   secondarySource?: {
-    type: 'yahoo-finance' | 'fred'
+    type: 'alpaca' | 'fred'
     symbol: string
     refreshIntervalMs: number
     maxAgeMs: number

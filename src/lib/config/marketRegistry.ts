@@ -1,11 +1,11 @@
 /**
  * Market Registry Configuration
- * Maps UI token IDs to Yahoo Finance tickers, FRED codes, and display metadata
+ * Maps UI token IDs to provider tickers (Alpaca), FRED codes, and display metadata
  */
 
 import type { MarketRegistryConfig } from '@/lib/types/market'
 
-// ─── FX Market Configuration ──────────────────────────────────────────────────
+// ─── FX Market Configuration ─────────────────────────────────────────────────
 
 const FX_MARKETS: Record<string, MarketRegistryConfig> = {
   DXY: {
@@ -13,7 +13,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'US Dollar Index',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'DX-Y.NYB',
       refreshIntervalMs: 30000,      // 30s during market hours
       maxAgeMs: 300000,              // Stale after 5 minutes
@@ -41,7 +41,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'EUR/USD',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'EURUSD=X',
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
@@ -68,7 +68,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'GBP/USD',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'GBPUSD=X',
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
@@ -95,7 +95,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'USD/JPY',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'USDJPY=X',
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
@@ -122,7 +122,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'USD/CNY',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'CNY=X',
       refreshIntervalMs: 60000,
       maxAgeMs: 600000, // Less liquid, allow 10min staleness
@@ -143,7 +143,7 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'AUD/USD',
     category: 'fx',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'AUDUSD=X',
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
@@ -160,132 +160,141 @@ const FX_MARKETS: Record<string, MarketRegistryConfig> = {
   },
 }
 
-// ─── Commodity Futures Configuration ──────────────────────────────────────────
+// ─── Commodity ETF Proxy Configuration ────────────────────────────────────────
+// Alpaca does not support COMEX/NYMEX futures formats (GC=F, CL=F, etc.).
+// We use exchange-traded ETFs that track the underlying commodities closely.
+//   GLD  — SPDR Gold Trust          (≈ 0.096 oz gold per share)
+//   SLV  — iShares Silver Trust     (≈ 0.952 oz silver per share)
+//   USO  — US Oil Fund (WTI)        (rolls front-month WTI futures)
+//   BNO  — US Brent Oil Fund        (rolls front-month Brent futures)
+//   CPER — US Copper Index Fund     (copper futures basket)
+//   UNG  — US Natural Gas Fund      (rolls front-month Henry Hub)
+// All are valid Alpaca us_equity tickers — no subscription upgrade required.
 
 const COMMODITY_MARKETS: Record<string, MarketRegistryConfig> = {
   GC: {
     id: 'GC',
-    displayName: 'Gold Futures',
+    displayName: 'Gold (GLD)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'GC=F',
+      type: 'alpaca',
+      symbol: 'GLD',          // SPDR Gold Trust — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
     decimals: 2,
-    unit: 'USD/oz',
-    exchangeCode: 'COMEX',
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
-      close: '16:00', // Sun 5pm-Fri 4pm ET
+      open: '09:30',
+      close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 
   SI: {
     id: 'SI',
-    displayName: 'Silver Futures',
+    displayName: 'Silver (SLV)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'SI=F',
+      type: 'alpaca',
+      symbol: 'SLV',          // iShares Silver Trust — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
-    decimals: 3,
-    unit: 'USD/oz',
-    exchangeCode: 'COMEX',
+    decimals: 2,
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
+      open: '09:30',
       close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 
   CL: {
     id: 'CL',
-    displayName: 'WTI Crude Oil',
+    displayName: 'WTI Oil (USO)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'CL=F',
+      type: 'alpaca',
+      symbol: 'USO',          // United States Oil Fund — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
     decimals: 2,
-    unit: 'USD/bbl',
-    exchangeCode: 'NYMEX',
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
+      open: '09:30',
       close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 
   BZ: {
     id: 'BZ',
-    displayName: 'Brent Crude Oil',
+    displayName: 'Brent Oil (BNO)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'BZ=F',
+      type: 'alpaca',
+      symbol: 'BNO',          // United States Brent Oil Fund — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
     decimals: 2,
-    unit: 'USD/bbl',
-    exchangeCode: 'ICE',
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
+      open: '09:30',
       close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 
   HG: {
     id: 'HG',
-    displayName: 'Copper Futures',
+    displayName: 'Copper (CPER)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'HG=F',
+      type: 'alpaca',
+      symbol: 'CPER',         // US Copper Index Fund — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
-    decimals: 4,
-    unit: 'USD/lb',
-    exchangeCode: 'COMEX',
+    decimals: 2,
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
+      open: '09:30',
       close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 
   NG: {
     id: 'NG',
-    displayName: 'Natural Gas Futures',
+    displayName: 'NatGas (UNG)',
     category: 'commodity',
     primarySource: {
-      type: 'yahoo-finance',
-      symbol: 'NG=F',
+      type: 'alpaca',
+      symbol: 'UNG',          // United States Natural Gas Fund — NYSE Arca
       refreshIntervalMs: 30000,
       maxAgeMs: 300000,
     },
-    decimals: 3,
-    unit: 'USD/MMBtu',
-    exchangeCode: 'NYMEX',
+    decimals: 2,
+    unit: 'USD/sh',
+    exchangeCode: 'NYSE',
     marketHours: {
-      open: '17:00',
+      open: '09:30',
       close: '16:00',
       timezone: 'America/New_York',
-      daysOpen: [0, 1, 2, 3, 4, 5],
+      daysOpen: [1, 2, 3, 4, 5],
     },
   },
 }
@@ -298,7 +307,7 @@ const INDEX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'S&P E-Mini',
     category: 'index',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'ES=F',
       refreshIntervalMs: 15000, // More aggressive polling
       maxAgeMs: 300000,
@@ -319,7 +328,7 @@ const INDEX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'Nasdaq E-Mini',
     category: 'index',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'NQ=F',
       refreshIntervalMs: 15000,
       maxAgeMs: 300000,
@@ -340,7 +349,7 @@ const INDEX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'DOW E-Mini',
     category: 'index',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'YM=F',
       refreshIntervalMs: 15000,
       maxAgeMs: 300000,
@@ -361,7 +370,7 @@ const INDEX_MARKETS: Record<string, MarketRegistryConfig> = {
     displayName: 'Russell 2000 E-Mini',
     category: 'index',
     primarySource: {
-      type: 'yahoo-finance',
+      type: 'alpaca',
       symbol: 'RTY=F',
       refreshIntervalMs: 15000,
       maxAgeMs: 300000,
@@ -408,21 +417,21 @@ export const getMarket = (id: string): MarketRegistryConfig | null => {
 }
 
 /**
- * Get the primary Yahoo Finance symbol for a market ID
- * @example getYahooSymbol('EURUSD') => 'EURUSD=X'
+ * Get the primary provider symbol for a market ID
+ * @example getProviderSymbol('EURUSD') => 'EURUSD=X'
  */
-export const getYahooSymbol = (id: string): string | null => {
+export const getProviderSymbol = (id: string): string | null => {
   const market = MARKET_REGISTRY[id]
-  if (!market || market.primarySource.type !== 'yahoo-finance') return null
+  if (!market) return null
   return market.primarySource.symbol
 }
 
 /**
- * Get all Yahoo symbols for a category
- * @example getYahooSymbolsByCategory('commodity') => ['GC=F', 'SI=F', ...]
+ * Get all provider symbols for a category
+ * @example getSymbolsByCategory('commodity') => ['GLD', 'SLV', 'USO', ...]
  */
-export const getYahooSymbolsByCategory = (category: string): string[] => {
+export const getSymbolsByCategory = (category: string): string[] => {
   return Object.values(MARKET_REGISTRY)
-    .filter(m => m.category === category && m.primarySource.type === 'yahoo-finance')
+    .filter(m => m.category === category)
     .map(m => m.primarySource.symbol)
 }

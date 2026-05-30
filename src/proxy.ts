@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { verifySession } from "@/lib/auth";
 
-export async function middleware(request: NextRequest) {
+// Next.js 16 renamed the middleware file convention to "proxy".
+// This file replaces src/middleware.ts — behaviour is identical.
+
+export async function proxy(request: NextRequest) {
   const session = await verifySession(request);
 
   // Protected routes that require authentication

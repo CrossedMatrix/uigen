@@ -77,8 +77,8 @@ export function useFXMarketData(pollInterval = 5 * 60_000): UseFXMarketDataState
             error: errorMsg,
           }))
 
-          // Retry after shorter interval on error
-          timeoutId = setTimeout(fetchData, Math.min(pollInterval, 30000))
+          // Retry after shorter interval on error — cap at 2 min to avoid hammering
+          timeoutId = setTimeout(fetchData, Math.min(pollInterval, 120_000))
         }
       }
     }

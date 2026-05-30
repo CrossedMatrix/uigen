@@ -16,7 +16,13 @@ export interface FredSeriesDiagnostic {
 
 export interface FredMarketsMeta {
   dataSource: 'FRED_API' | 'MOCK_FALLBACK'
-  status:     'AUTHENTICATED' | 'DEMO_FALLBACK'
+  /**
+   * AUTHENTICATED → live FRED data, freshly fetched this request.
+   * CACHED        → last successful FRED snapshot served from server-side TTL cache
+   *                 (FRED timed out / rate-limited; data is real but not current).
+   * DEMO_FALLBACK → no FRED_API_KEY or all fetches failed with no prior cache entry.
+   */
+  status:     'AUTHENTICATED' | 'CACHED' | 'DEMO_FALLBACK'
   timestamp:  string
   /** Per-series diagnostics – populated on AUTHENTICATED responses */
   diagnostics?: Record<string, FredSeriesDiagnostic>

@@ -3,7 +3,14 @@ import type {
   FedLiquiditySnapshot,
   FedLiquidityMeta,
   FedLiquidityDiagnostic,
-} from '@/lib/squawk-types'
+} from '@/lib/types/fed-liquidity'
+import { toPrecise, computeNetLiquidity } from '@/lib/format/fedLiquidity'
+import {
+  fredCacheRead,
+  fredCacheWrite,
+  fredCacheSeedRead,
+  cacheAgeLabel,
+} from '@/lib/services/fredCacheStore'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -54,22 +61,57 @@ const SANITY = {
   RRP:         { min: 0,     max: 5_000  }, // RRP realistically 0 – 5 T
 }
 
+// ─── Cache key ────────────────────────────────────────────────────────────────
+
+const CACHE_KEY = 'fed-liquidity'
+
+// ─── Stale-cache response helper ─────────────────────────────────────────────
+//
+// Tags the snapshot's meta.status as 'CACHED' so the UI badge switches from
+// ■ DEMO DATA  →  ◐ CACHED · FRED  (amber, real data, not live).
+
+function serveStaleCache(
+  snapshot:  FedLiquiditySnapshot,
+  fetchedAt: number,
+): NextResponse {
+  console.warn(
+    `[fed-liquidity] FRED unavailable — serving cache ` +
+    `(age: ${cacheAgeLabel(fetchedAt)}, fetched ${new Date(fetchedAt).toISOString()})`,
+  )
+  const stale: FedLiquiditySnapshot = {
+    ...snapshot,
+    meta: snapshot.meta
+      ? { ...snapshot.meta, status: 'CACHED', timestamp: new Date().toISOString() }
+      : undefined,
+  }
+  return NextResponse.json(stale, { status: 200 })
+}
+
 // ─── FRED Mock Fallback ──────────────────────────────────────────────────────
 
 const DEMO_META: FedLiquidityMeta = {
   dataSource:  'MOCK_FALLBACK',
   status:      'DEMO_FALLBACK',
-  seriesDates: { walcl: '—', wtregen: '—', rrpontsyd: '—' },
+  seriesDates: { fta: '—', tga: '—', rro: '—' },
   timestamp:   new Date().toISOString(),
 }
 
+// All figures are in BILLIONS of USD on a single normalized scale, matching the
+// live parser (WALCL millions→billions via /1_000; RRPONTSYD already billions).
+//
+// RRPONTSYD note: the overnight reverse-repo facility drained from its
+// 2022-23 peak (~$2.48 T) down to a few billion dollars by 2026.  The previous
+// mock hard-coded rrp: 2_480 (=$2.48 T), which inflated the "drained" metric and
+// collapsed net liquidity.  The realistic late-May-2026 level fluctuates between
+// roughly $1 B and $2 B, so net liquidity lands in the correct ~$5.6-5.7 T band:
+//   netLiquidity = balanceSheetTotal − tga − rrp = 6480 − 830 − 1.5 = 5648.5
 const MOCK_SNAPSHOT: FedLiquiditySnapshot = {
   date:              new Date().toISOString().split('T')[0],
-  balanceSheetTotal: 7_240,
-  tga:               165,
-  rrp:               2_480,
-  netLiquidity:      4_595,
-  momentum14d:       -2.4,
+  balanceSheetTotal: 6_480,
+  tga:               830,
+  rrp:               1.5,
+  netLiquidity:      5_648.5,
+  momentum14d:       -0.30,
   momentumDirection: 'contracting',
   meta:              DEMO_META,
 }
@@ -94,8 +136,12 @@ async function fetchSeries(seriesId: string, limit = 25): Promise<FREDObservatio
     limit:      String(limit),
   })
 
+  // AbortSignal.timeout caps each individual FRED request at 8 s.
+  // Without this, a slow FRED server causes the Promise.all to hang
+  // until Next.js kills the whole handler with a 504.
   const res = await fetch(`${FRED_BASE_URL}?${params}`, {
-    next: { revalidate: 3600 },
+    next:   { revalidate: 3600 },
+    signal: AbortSignal.timeout(8_000),
   })
 
   if (!res.ok) {
@@ -158,27 +204,65 @@ function findNearest(obs: FREDObservation[], target: Date): FREDObservation {
 // ─── GET Handler ──────────────────────────────────────────────────────────────
 
 export async function GET() {
-  // ── Guard: no key → immediate demo fallback ───────────────────────────────
+  // ── 0. Read cache (memory → file) ─────────────────────────────────────────
+  const cached = fredCacheRead<FedLiquiditySnapshot>(CACHE_KEY)
+
+  // ── Guard: no key ──────────────────────────────────────────────────────────
+  // Even without a key we can serve a prior successful cache entry so the UI
+  // shows real data after a server restart where the key was temporarily absent.
   if (!FRED_API_KEY) {
+    if (cached) return serveStaleCache(cached.entry.data, cached.entry.fetchedAt)
+    const seed = fredCacheSeedRead<FedLiquiditySnapshot>(CACHE_KEY)
+    if (seed) return serveStaleCache(seed.data, seed.fetchedAt)
     console.warn('[fed-liquidity] FRED_API_KEY not set – serving mock data')
     return NextResponse.json({ ...MOCK_SNAPSHOT, meta: DEMO_META }, { status: 200 })
   }
 
+  // ── Fresh cache hit — skip FRED entirely ──────────────────────────────────
+  if (cached?.fresh) {
+    console.info(
+      `[fed-liquidity] Cache hit (age: ${cacheAgeLabel(cached.entry.fetchedAt)}, ` +
+      `source: ${cached.source}) — skipping FRED fetch`,
+    )
+    return NextResponse.json(cached.entry.data, { status: 200 })
+  }
+
   // ── 1. Fire all primary requests in parallel (no rejection cascades) ─────
-  const [walclR, wtregenR, rrpR] = await Promise.all([
+  //   HY-OAS and STLFSI4 ride along here so a single round-trip covers every
+  //   FRED series the dashboard renders.  Both new series fail-open: if the
+  //   fetch errors out, the relevant card simply hides itself rather than
+  //   blocking the rest of the snapshot.
+  const [walclR, wtregenR, rrpR, hyOasR, stlfsiR] = await Promise.all([
     safeFetch(SERIES.WALCL.id,     25),
     safeFetch(SERIES.WTREGEN.id,   25), // user-requested primary
     safeFetch(SERIES.RRPONTSYD.id, 25),
+    safeFetch('BAMLH0A0HYM2',      5),  // ICE BofA High Yield OAS (daily)
+    safeFetch('STLFSI4',           5),  // St. Louis Fed Financial Stress Index (weekly)
   ])
 
   // ── 2. WALCL is the gate for AUTHENTICATED status ─────────────────────────
+  // On any failure (429, 504, timeout, network error): prefer stale cache
+  // (real historical data) over the hard-coded static mock.
   if (!walclR.ok) {
-    console.error('[fed-liquidity] PRIMARY WALCL failed – returning DEMO_FALLBACK:', walclR.error)
+    console.error(
+      '[fed-liquidity] PRIMARY WALCL failed:', walclR.error,
+      walclR.error?.includes('429') ? '← FRED rate-limit hit' : '',
+    )
+    if (cached) return serveStaleCache(cached.entry.data, cached.entry.fetchedAt)
+
+    // ── L3: committed seed — real data, always present on any checkout ──────
+    const seed = fredCacheSeedRead<FedLiquiditySnapshot>(CACHE_KEY)
+    if (seed) {
+      console.warn(
+        `[fed-liquidity] Using committed seed (age: ${cacheAgeLabel(seed.fetchedAt)}) ` +
+        '— live FRED unavailable and no file cache exists',
+      )
+      return serveStaleCache(seed.data, seed.fetchedAt)
+    }
+
+    console.warn('[fed-liquidity] No cache or seed available — returning DEMO_FALLBACK')
     return NextResponse.json(
-      {
-        ...MOCK_SNAPSHOT,
-        meta: { ...DEMO_META, timestamp: new Date().toISOString() },
-      },
+      { ...MOCK_SNAPSHOT, meta: { ...DEMO_META, timestamp: new Date().toISOString() } },
       { status: 200 },
     )
   }
@@ -279,7 +363,11 @@ export async function GET() {
   }
 
   // ── 6. Net Liquidity ──────────────────────────────────────────────────────
-  const netLiquidity = walclBillions - tgaBillions - rrpBillions
+  //   Compute on the FULL-PRECISION billions values (no rounding upstream).
+  //   This is critical for small RRP balances — e.g. RRPONTSYD = $1.78 B
+  //   would round to 2 if we used Math.round before subtracting; here the
+  //   raw 1.78 flows through into the difference.
+  const netLiquidity = computeNetLiquidity(walclBillions, tgaBillions, rrpBillions)
 
   // ── 7. 14-day momentum on WALCL ───────────────────────────────────────────
   const t14         = new Date()
@@ -293,39 +381,81 @@ export async function GET() {
     momentum14d >  0.5 ? 'expanding'   :
     momentum14d < -0.5 ? 'contracting' : 'flat'
 
+  // ── 7b. Extract HY-OAS and STLFSI4 — fail-open ────────────────────────────
+  //   Both series are best-effort additions to the dashboard.  A missing
+  //   observation or transient FRED failure leaves the corresponding field
+  //   undefined; the React monitor card then hides its row entirely so a
+  //   single broken series can't blank out the primary WALCL/TGA/RRP grid.
+  let hyOasSpread: number | undefined
+  let hyOasDate:   string | undefined
+  if (hyOasR.ok) {
+    const v = parseFloat(hyOasR.obs[0].value)
+    if (Number.isFinite(v) && v >= 0 && v < 50) {           // sanity: 0..50pp
+      hyOasSpread = parseFloat(v.toFixed(3))
+      hyOasDate   = hyOasR.obs[0].date
+    }
+  }
+
+  let stlfsi:     number | undefined
+  let stlfsiDate: string | undefined
+  if (stlfsiR.ok) {
+    const v = parseFloat(stlfsiR.obs[0].value)
+    if (Number.isFinite(v) && v > -10 && v < 20) {           // sanity: ±extremes
+      stlfsi     = parseFloat(v.toFixed(3))
+      stlfsiDate = stlfsiR.obs[0].date
+    }
+  }
+
   // ── 8. Assemble & return ──────────────────────────────────────────────────
   const meta: FedLiquidityMeta = {
     dataSource:  'FRED_API',
     status:      'AUTHENTICATED',  // ← key fix: WALCL succeeded, that's the gate
+    // Raw FRED series mapped onto the clean display acronyms:
+    //   fta ← WALCL, tga ← WTREGEN, rro ← RRPONTSYD
     seriesDates: {
-      walcl:     walclR.obs[0].date,
-      wtregen:   tgaDate,
-      rrpontsyd: rrpDate,
+      fta: walclR.obs[0].date,
+      tga: tgaDate,
+      rro: rrpDate,
     },
     timestamp: new Date().toISOString(),
     diagnostics: {
-      walcl:     walclDiag,
-      tga:       tgaDiag,
-      rrpontsyd: rrpDiag,
+      fta: walclDiag,
+      tga: tgaDiag,
+      rro: rrpDiag,
     },
   }
 
+  // ── Precision policy ──
+  //   See `lib/format/fedLiquidity.ts` for the rationale.  Math.round() was
+  //   the previous bug — it collapsed small RRP balances (e.g. 1.78 → 2) and
+  //   cascaded into netLiquidity.  toPrecise() preserves 3 decimal places
+  //   (million-dollar resolution at the billion scale).
   const snapshot: FedLiquiditySnapshot = {
     date:              walclR.obs[0].date,
-    balanceSheetTotal: Math.round(walclBillions),
-    tga:               Math.round(tgaBillions),
-    rrp:               Math.round(rrpBillions),
-    netLiquidity:      Math.round(netLiquidity),
+    balanceSheetTotal: toPrecise(walclBillions),
+    tga:               toPrecise(tgaBillions),
+    rrp:               toPrecise(rrpBillions),
+    netLiquidity:      toPrecise(netLiquidity),
     momentum14d:       parseFloat(momentum14d.toFixed(2)),
     momentumDirection,
+    hyOasSpread,
+    hyOasDate,
+    stlfsi,
+    stlfsiDate,
     meta,
   }
 
   console.info(
     `[fed-liquidity] AUTHENTICATED — ` +
-    `BS:$${snapshot.balanceSheetTotal}B  TGA:$${snapshot.tga}B(${tgaDiag.resolvedSeriesId}${tgaDiag.usedFallback ? '*' : ''})  ` +
-    `RRP:$${snapshot.rrp}B  Net:$${snapshot.netLiquidity}B  14d:${momentum14d.toFixed(2)}%`
+    `BS:$${snapshot.balanceSheetTotal.toFixed(2)}B  ` +
+    `TGA:$${snapshot.tga.toFixed(2)}B(${tgaDiag.resolvedSeriesId}${tgaDiag.usedFallback ? '*' : ''})  ` +
+    `RRP:$${snapshot.rrp.toFixed(3)}B  Net:$${snapshot.netLiquidity.toFixed(2)}B  14d:${momentum14d.toFixed(2)}%  ` +
+    `HY-OAS:${hyOasSpread != null ? hyOasSpread.toFixed(2) + 'pp' : '—'}  ` +
+    `STLFSI:${stlfsi != null ? stlfsi.toFixed(2) : '—'}`
   )
+
+  // ── Persist to cache (L1 memory + L2 file) ───────────────────────────────
+  fredCacheWrite(CACHE_KEY, snapshot)
 
   return NextResponse.json(snapshot, { status: 200 })
 }

@@ -1,12 +1,27 @@
 import { NextResponse } from 'next/server'
 import type { FXMarketDataResponse, FXDataWithValidation } from '@/lib/types/fx-market-data'
 import { FRED_FX_SERIES } from '@/lib/types/fx-market-data'
-import { fetchFXBatch } from '@/lib/services/yahoo-finance-fx'
 import {
   validateFXPair,
   summarizeValidation,
   isValidationHealthy,
 } from '@/lib/services/fx-validation'
+
+// ─── Provider Stub ────────────────────────────────────────────────────────────
+// TODO: Replace with Alpaca SDK call once credentials are configured.
+// Returns an empty map — FX pairs will display FRED prices only until wired in.
+
+interface ProviderFXQuote {
+  price:         number | null
+  change:        number | null
+  changePercent: number | null
+  timestamp:     number
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function fetchProviderFXBatch(_symbols: string[]): Promise<Map<string, ProviderFXQuote>> {
+  return new Map()
+}
 
 // ─── FRED Configuration ────────────────────────────────────────────────────────
 
@@ -197,15 +212,15 @@ export async function GET() {
   const startTime = Date.now()
 
   try {
-    // Fetch FRED and Yahoo data in parallel
+    // Fetch FRED and provider data in parallel
     const [fredData, yahooData] = await Promise.all([
       fetchAllFREDFXData(),
-      fetchFXBatch(
+      fetchProviderFXBatch(
         Object.values(FRED_FX_SERIES).map(cfg => cfg.yahooSymbol)
       ),
     ])
 
-    // Convert Yahoo FX data to usable format (allows null for rate-limited data)
+    // Convert provider FX data to usable format (empty until provider wired in)
     const yahooFormatted = new Map<string, {
       price: number | null
       change: number | null
