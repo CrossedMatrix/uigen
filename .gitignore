@@ -1,7 +1,18 @@
 CLAUDE.md
 CLAUDE.local.md
+
+# ── Secrets / environment ──────────────────────────────────────────────────────
+# Never commit any .env file except .env.example (which has no real values).
 .env
 .env.local
+.env.*.local
+*.env
+
+# ── Build artefacts ────────────────────────────────────────────────────────────
 node_modules/
 .next/
+
+# ── Data / DB ──────────────────────────────────────────────────────────────────
 prisma/dev.db
+# FRED API response cache — persists across dev-server restarts, safe to delete
+.fred-cache/
