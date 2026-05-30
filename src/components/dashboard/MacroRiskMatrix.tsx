@@ -505,10 +505,76 @@ function FxStressCard({
 
 export interface MacroRiskMatrixProps {
   metrics: MacroRiskMetrics
+  /**
+   * Live VIXY snapshot price from Alpaca (already ticking on the dashboard).
+   * When provided AND the server payload is in a cold-start / BASELINE state
+   * (timestamp === 0), the component uses this value to override vix.price
+   * and re-derives MOVE / SKEW β-projections from it in-client, keeping the
+   * tiles dynamic instead of frozen at the static BASELINE constants.
+   */
+  liveVixyPrice?:    number | null
+  liveVixyChangePct?: number | null
 }
 
-export function MacroRiskMatrix({ metrics }: MacroRiskMatrixProps) {
-  const { vix, vvix, move, gamma, skew, putCallRatio, dataSource, timestamp, credit, fx } = metrics
+export function MacroRiskMatrix({ metrics, liveVixyPrice, liveVixyChangePct }: MacroRiskMatrixProps) {
+  const { vvix, move, gamma, skew, putCallRatio, dataSource, timestamp, credit, fx } = metrics
+
+  // ── VIX live-override logic ──────────────────────────────────────────────────
+  // When the server payload is in a cold-start baseline (timestamp === 0) AND
+  // a live VIXY snapshot is available client-side, replace the static baseline
+  // values so VIX / MOVE / SKEW remain dynamic.
+  //
+  // VIXY_TO_VIX_SCALE = 0.75: maps VIXY share price (~$23) onto the cash-VIX
+  // implied-vol scale (~17).  Same constant used in /api/vol-risk.
+  const VIXY_TO_VIX_SCALE = 0.75
+  const isBaseline = timestamp === 0
+
+  // Effective VIX: prefer server payload (already normalised) unless it's a
+  // baseline cold-start, in which case use the live Alpaca VIXY snapshot.
+  const vixOverride: typeof metrics.vix | null =
+    isBaseline && liveVixyPrice != null && liveVixyPrice > 0
+      ? {
+          price:         parseFloat((liveVixyPrice  * VIXY_TO_VIX_SCALE).toFixed(2)),
+          change:        0,   // intraday change unknown without prior close
+          changePercent: liveVixyChangePct ?? 0,
+        }
+      : null
+
+  const vix = vixOverride ?? metrics.vix
+
+  // β-derive MOVE and SKEW from the live VIX change% when server is baseline.
+  // Same coefficients used in /api/vol-risk buildMetrics().
+  const BASELINE_MOVE = 115.0
+  const BASELINE_SKEW = 130.0
+  const VOL_BETA_MOVE = 0.30
+  const VOL_BETA_SKEW = 0.20
+
+  const effectiveMove = (isBaseline && vixOverride)
+    ? {
+        price:          parseFloat((BASELINE_MOVE * (1 + (vix.changePercent / 100) * VOL_BETA_MOVE)).toFixed(2)),
+        change:         parseFloat(((BASELINE_MOVE * (1 + (vix.changePercent / 100) * VOL_BETA_MOVE)) - BASELINE_MOVE).toFixed(2)),
+        changePercent:  parseFloat((vix.changePercent * VOL_BETA_MOVE).toFixed(2)),
+        historicalMean: 115,
+      }
+    : move
+
+  const effectiveSkew = (isBaseline && vixOverride)
+    ? {
+        price:         parseFloat((BASELINE_SKEW * (1 + (vix.changePercent / 100) * VOL_BETA_SKEW)).toFixed(2)),
+        change:        parseFloat(((BASELINE_SKEW * (1 + (vix.changePercent / 100) * VOL_BETA_SKEW)) - BASELINE_SKEW).toFixed(2)),
+        changePercent: parseFloat((vix.changePercent * VOL_BETA_SKEW).toFixed(2)),
+      }
+    : skew
+
+  // Effective source map: when we've overridden from VIXY, upgrade vix from
+  // 'baseline' → 'live' and move/skew from 'baseline' → 'derived'.
+  const effectiveSrc: DataSourceMap = {
+    ...(dataSource ?? {
+      vix: 'baseline', vvix: 'baseline', move: 'baseline',
+      skew: 'baseline', gamma: 'baseline', putCallRatio: 'baseline',
+    }),
+    ...(vixOverride ? { vix: 'live' as const, move: 'derived' as const, skew: 'derived' as const } : {}),
+  }
 
   // ── Stale detection ───────────────────────────────────────────────────────
   // Recompute age every 5 seconds so the UI responds within one tick of going stale.
@@ -534,17 +600,14 @@ export function MacroRiskMatrix({ metrics }: MacroRiskMatrixProps) {
   const isStale   = timestamp > 0 && ageSeconds > STALE_AFTER_S
   const updatedAt = timestamp === 0 ? 'baseline' : fmtAge(ageSeconds)
 
-  // Resolve per-metric sources (treat absent dataSource as all-baseline)
-  const src: DataSourceMap = dataSource ?? {
-    vix: 'baseline', vvix: 'baseline', move: 'baseline',
-    skew: 'baseline', gamma: 'baseline', putCallRatio: 'baseline',
-  }
+  // Resolve per-metric sources — use the effective (potentially overridden) map
+  const src = effectiveSrc
 
   // ── Risk scores ───────────────────────────────────────────────────────────
-  const vixScore     = calculateRiskScore(vix.price,      12,   35)
-  const moveScore    = calculateRiskScore(move.price,     60,  160)
-  const vvixScore    = calculateRiskScore(vvix.price,     75,  130)
-  const skewScore    = calculateRiskScore(skew.price,    115,  155)
+  const vixScore     = calculateRiskScore(vix.price,              12,   35)
+  const moveScore    = calculateRiskScore(effectiveMove.price,    60,  160)
+  const vvixScore    = calculateRiskScore(vvix.price,             75,  130)
+  const skewScore    = calculateRiskScore(effectiveSkew.price,   115,  155)
   const putCallScore = calculateRiskScore(putCallRatio, 0.45, 1.15)
   const gammaScore   = gamma.regime === 'low' ? 100 : gamma.regime === 'medium' ? 50 : 0
   const avgScore     = (vixScore + moveScore + vvixScore + skewScore + putCallScore + gammaScore) / 6
@@ -699,24 +762,24 @@ export function MacroRiskMatrix({ metrics }: MacroRiskMatrixProps) {
           title="MOVE"
           subtitle="Bond Volatility"
           source={src.move}
-          value={move.price.toFixed(1)}
-          change={fmtChange(move.change, 2)}
-          changePct={move.changePercent.toFixed(1) + '%'}
+          value={effectiveMove.price.toFixed(1)}
+          change={fmtChange(effectiveMove.change, 2)}
+          changePct={effectiveMove.changePercent.toFixed(1) + '%'}
           score={moveScore}
           regime={moveScore > 66.67 ? 'CALM' : moveScore > 33.33 ? 'MODERATE' : 'STRESS'}
-          note={move.price > 150 ? 'Rate volatility spike' : move.price > 130 ? 'Rising rate uncertainty' : 'Stable bond market'}
+          note={effectiveMove.price > 150 ? 'Rate volatility spike' : effectiveMove.price > 130 ? 'Rising rate uncertainty' : 'Stable bond market'}
           explanation="ICE BofA MOVE index — bond market implied vol. Derived: baseline 115 × (1 + VIX_change% × 0.30)."
         />
         <ScoreCard
           title="SKEW"
           subtitle="Tail Risk Premium"
           source={src.skew}
-          value={skew.price.toFixed(1)}
-          change={fmtChange(skew.change, 2)}
-          changePct={skew.changePercent.toFixed(1) + '%'}
+          value={effectiveSkew.price.toFixed(1)}
+          change={fmtChange(effectiveSkew.change, 2)}
+          changePct={effectiveSkew.changePercent.toFixed(1) + '%'}
           score={skewScore}
           regime={skewScore > 66.67 ? 'CHEAP' : skewScore > 33.33 ? 'NORMAL' : 'EXPENSIVE'}
-          note={skew.price > 145 ? 'Expensive downside hedges' : skew.price < 120 ? 'Compressed tail risk' : 'Normal tail pricing'}
+          note={effectiveSkew.price > 145 ? 'Expensive downside hedges' : effectiveSkew.price < 120 ? 'Compressed tail risk' : 'Normal tail pricing'}
           explanation="CBOE SKEW index. Derived: baseline 130 × (1 + VIX_change% × 0.20)."
         />
         {/* Row 2: PUT/CALL · CREDIT · USD */}
@@ -784,7 +847,7 @@ export function MacroRiskMatrix({ metrics }: MacroRiskMatrixProps) {
         </div>
         {/* Row: stress badge + tail risk + attribution note */}
         <div className="flex items-center gap-2 mt-3 flex-wrap">
-          <StressBadge vixPrice={vix.price} movePrice={move.price} />
+          <StressBadge vixPrice={vix.price} movePrice={effectiveMove.price} />
           <TailRiskAlert
             vvixPrice={vvix.price}  vvixChange={vvix.change}
             vixPrice={vix.price}   vixChange={vix.change}

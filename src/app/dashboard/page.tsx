@@ -1569,12 +1569,21 @@ export default function DashboardPage() {
   // SPY · QQQ · DIA · IWM · VIXY — standard liquid US equity / ETF proxies.
   // VIXY fills the vol-proxy slot while the secondary IBKR account (CL futures)
   // is pending approval.  All five share a single IEX snapshot request.
-  const { quotes: etfQuotes } = useAlpacaData({
+  const { quotes: etfQuotes, quoteMap: etfQuoteMap } = useAlpacaData({
     symbols:      ['SPY', 'QQQ', 'DIA', 'IWM', 'VIXY'],
     assetClass:   'us_equity',
     type:         'snapshot',
     pollInterval: 300_000,
   })
+
+  // Alpaca-backed ETF fallbacks for FMP index symbols.
+  // When FMP returns 402 (subscription-walled) for ^NDX / ^GSPC, pass the live
+  // ETF prices instead.  CrossAssetRatiosPanel applies the NDX_SPX_SCALAR (4.10)
+  // internally, so these are raw share-price levels (QQQ ≈ $480, SPY ≈ $530).
+  // The panel prefers real ^NDX/^GSPC when non-null, so there is zero regression
+  // when FMP is healthy.
+  const alpacaQqq = etfQuoteMap.get('QQQ')?.price ?? null
+  const alpacaSpy = etfQuoteMap.get('SPY')?.price ?? null
 
   const load = useCallback(async () => {
     try {
@@ -1781,8 +1790,8 @@ export default function DashboardPage() {
                 CrossAssetRatiosPanel renders its own heading; badge passed as prop. */}
             <section>
               <CrossAssetRatiosPanel
-                ndx={data.equities.find(e => e.symbol === '^NDX')?.price ?? null}
-                spx={data.equities.find(e => e.symbol === '^GSPC')?.price ?? null}
+                ndx={data.equities.find(e => e.symbol === '^NDX')?.price ?? alpacaQqq}
+                spx={data.equities.find(e => e.symbol === '^GSPC')?.price ?? alpacaSpy}
                 vix={data.volatility.vix.price}
                 rate10y={data.rates.find(r => r.symbol === '^TNX')?.price ?? null}
                 rate5y={data.rates.find(r => r.symbol === '^FVX')?.price ?? null}
@@ -1869,7 +1878,11 @@ export default function DashboardPage() {
                 )}
               </div>
               <div className="space-y-3">
-                <MacroRiskMatrix metrics={volRisk ?? MACRO_RISK_MOCK} />
+                <MacroRiskMatrix
+                  metrics={volRisk ?? MACRO_RISK_MOCK}
+                  liveVixyPrice={etfQuoteMap.get('VIXY')?.price ?? null}
+                  liveVixyChangePct={etfQuoteMap.get('VIXY')?.changePercent ?? null}
+                />
                 <IndexSkewHeads skewData={INDEX_SKEW_MOCK} />
               </div>
             </section>

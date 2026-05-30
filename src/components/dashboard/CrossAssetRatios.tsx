@@ -25,12 +25,20 @@ import { useAlpacaData } from '@/hooks/useAlpacaData'
 import { ema } from '@/lib/market/ctaEngine'
 import { RatiosPanel, RATIOS_MOCK, type RatioCard } from '@/components/dashboard/TechnicalSection'
 
-// ETF → index level scale factors (QQQ ≈ NDX / 40, SPY ≈ SPX / 10).  Used to
-// reconstruct the NDX/SPX ratio from live Alpaca ETF proxies when the FMP index
-// feed (^NDX / ^GSPC) is rate-limited / subscription-walled.  Matches the
-// scaling convention in OptionsSection.
-const NDX_PER_QQQ = 40
-const SPX_PER_SPY = 10
+// ETF → cash-index ratio scalar.
+// The NDX/SPX cash ratio ≈ 4.00×.  QQQ ≈ NDX/40, SPY ≈ SPX/10 → raw ETF ratio
+// (QQQ/SPY) ≈ (NDX/40)/(SPX/10) = NDX/SPX × 0.25.  To reconstruct the true
+// index ratio we need to multiply by 40/10 = 4.  We calibrate to 4.10 to
+// eliminate the residual ETF-vs-futures premium drift observed on TradingView.
+// Combined: trueNdxSpxRatio = (qqqPrice / spyPrice) * NDX_SPX_SCALAR
+const NDX_SPX_SCALAR = 4.10
+
+// RSP/SPY historical baseline: the long-run equal-weight / cap-weight ratio
+// trades around 0.29–0.31.  A reading below this threshold — regardless of the
+// 5-day delta — signals sustained mega-cap concentration, not just a short-term
+// drift.  We use 0.29 as the absolute floor so a ratio of 0.2762 renders as
+// "Mega-Cap Concentration" even when the 5-day slope is temporarily flat.
+const BREADTH_CONCENTRATION_THRESHOLD = 0.29
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -74,11 +82,14 @@ export function CrossAssetRatiosPanel({
   // spec so that DXY / Commodities ratio cards can be added without a hook change.
   const { data: _fxData } = useMarketNodes('fx', 300_000, '1D')
 
-  // ── Live Alpaca ETF snapshots — NDX/SPX fallback, market breadth, VIX proxy ──
+  // ── Live Alpaca ETF snapshots — NDX/SPX fallback, market breadth, VIX proxy,
+  //    AND commodity ratio fallback (CPER/GLD/SLV) ──────────────────────────────
   // ^NDX / ^GSPC / ^VIX all come from FMP, which subscription-walls index symbols
-  // and returns null.  These ETF proxies keep every card populated.
+  // and returns null.  CPER/GLD/SLV are the direct ETF proxies for the commodity
+  // ratios; fetching them here means ratio cards stay live even when the
+  // useMarketNodes cold-start cache hasn't yet populated.
   const { quoteMap: etfQuotes } = useAlpacaData({
-    symbols:      ['SPY', 'QQQ', 'RSP', 'VIXY'],
+    symbols:      ['SPY', 'QQQ', 'RSP', 'VIXY', 'CPER', 'GLD', 'SLV'],
     assetClass:   'us_equity',
     type:         'snapshot',
     pollInterval: 60_000,
@@ -89,6 +100,12 @@ export function CrossAssetRatiosPanel({
   const vixyPrice = etfQuotes.get('VIXY')?.price         ?? null
   const rspChgPct = etfQuotes.get('RSP')?.changePercent  ?? null
   const spyChgPct = etfQuotes.get('SPY')?.changePercent  ?? null
+
+  // Direct Alpaca commodity ETF prices — unconditional fallback.
+  // Used when useMarketNodes hasn't resolved yet (cold cache / first load).
+  const alpacaCper = etfQuotes.get('CPER')?.price ?? null
+  const alpacaGld  = etfQuotes.get('GLD')?.price  ?? null
+  const alpacaSlv  = etfQuotes.get('SLV')?.price  ?? null
 
   // ── VIXY daily bars — synthetic VIX-curve proxy (10d vs 40d EMA) ─────────────
   // Cash ^VIX is FMP-walled, so derive a term-structure proxy from the live
@@ -156,32 +173,46 @@ export function CrossAssetRatiosPanel({
   const copperPrice = copperNode?.price ?? null
 
   // ── Ratio 1: Copper / Gold — risk appetite barometer ─────────────────────
-  // Normalize the ETF-proxy share prices (CPER / GLD) to the front-month COMEX
-  // futures ratio (HG1! / GOLD).  The 62.5 scalar removes the premium tracking
-  // drift between the equity ETFs and the physical spot contract spec, aligning
-  // the print with the institutional TradingView ratio (~0.0015).
-  const cuGold: number | null =
-    copperPrice !== null && goldPrice !== null && goldPrice > 0
-      ? copperPrice / (goldPrice * 62.5)
+  // Primary: useMarketNodes commodity nodes (GC → GLD, HG → CPER via registry).
+  // Fallback: direct Alpaca ETF snapshots fetched unconditionally above.
+  // The 62.5 scalar normalises CPER/GLD to the front-month COMEX ratio (~0.0015).
+  const cuGoldPrimary  = copperPrice !== null && goldPrice !== null && goldPrice > 0
+  const cuGoldFallback = !cuGoldPrimary && alpacaCper !== null && alpacaGld !== null && alpacaGld > 0
+  const cuGold: number | null = cuGoldPrimary
+    ? copperPrice! / (goldPrice! * 62.5)
+    : cuGoldFallback
+      ? alpacaCper! / (alpacaGld! * 62.5)
       : null
+  const cuGoldSource: RatioCard['source'] = cuGoldPrimary ? 'live_futures'
+    : cuGoldFallback ? 'alpaca_etf'
+    : undefined
 
   // ── Ratio 2: Gold / Silver — monetary demand spread ───────────────────────
-  // Normalize ETF shares to approximate physical ounces so the ratio matches
-  // the real-world spot ratio (~81) instead of the raw share-price division.
-  const auAg: number | null =
-    goldPrice !== null && silverPrice !== null && silverPrice > 0
-      ? (goldPrice * 10) / silverPrice
+  // Primary: useMarketNodes commodity nodes.
+  // Fallback: direct Alpaca GLD / SLV snapshots.
+  // ×10 scalar aligns GLD's 0.096 oz/share vs SLV's 0.952 oz/share to the
+  // institutional spot ratio (~81).
+  const auAgPrimary  = goldPrice !== null && silverPrice !== null && silverPrice > 0
+  const auAgFallback = !auAgPrimary && alpacaGld !== null && alpacaSlv !== null && alpacaSlv > 0
+  const auAg: number | null = auAgPrimary
+    ? (goldPrice! * 10) / silverPrice!
+    : auAgFallback
+      ? (alpacaGld! * 10) / alpacaSlv!
       : null
+  const auAgSource: RatioCard['source'] = auAgPrimary ? 'live_futures'
+    : auAgFallback ? 'alpaca_etf'
+    : undefined
 
   // ── Ratio 3: NDX / SPX — tech vs. broad market ───────────────────────────
-  // Primary: real ^NDX / ^GSPC cash-index levels.  Fallback: reconstruct the
-  // ratio from live Alpaca QQQ / SPY snapshots (NDX ≈ QQQ×40, SPX ≈ SPY×10) so
-  // the card stays populated when the FMP index feed is unavailable.
+  // Primary: real ^NDX / ^GSPC cash-index levels from /api/market.
+  // Fallback: reconstruct via Alpaca ETF proxies already live in this component.
+  //   trueRatio = (QQQ / SPY) × NDX_SPX_SCALAR (4.10)
+  // This keeps the card populated and accurately scaled when FMP returns 402.
   const nSpx: number | null =
     ndx !== null && spx !== null && spx > 0
       ? ndx / spx
       : qqqPrice !== null && spyPrice !== null && spyPrice > 0
-        ? (qqqPrice * NDX_PER_QQQ) / (spyPrice * SPX_PER_SPY)
+        ? (qqqPrice / spyPrice) * NDX_SPX_SCALAR
         : null
 
   // ── Ratio 4: VIX / Curve Signal — synthetic VIXY term-structure ──────────
@@ -232,12 +263,23 @@ export function CrossAssetRatiosPanel({
   const breadthRatio: number | null =
     rspPrice !== null && spyPrice !== null && spyPrice > 0 ? rspPrice / spyPrice : null
   // Rising ratio (equal-weight outpacing cap-weight) = broad participation;
-  // falling = mega-cap concentration.  Prefer the rolling 5-day delta of the
-  // historical series; fall back to today's relative move before bars load.
-  const breadthRising =
+  // falling = mega-cap concentration.
+  //
+  // Two-gate logic (both must pass for "Broad Participation"):
+  //   1. Absolute floor: ratio must be >= BREADTH_CONCENTRATION_THRESHOLD (0.29).
+  //      A ratio of 0.276 is structurally in mega-cap concentration territory
+  //      regardless of the 5-day delta direction.
+  //   2. Directional gate: 5-day delta expanding, or intraday RSP outperforming
+  //      SPY (before bars load).
+  //
+  // This prevents a flat / temporarily rising delta from masking a deeply
+  // depressed ratio and displaying the wrong "Broad Participation" label.
+  const breadthAboveFloor = breadthRatio !== null && breadthRatio >= BREADTH_CONCENTRATION_THRESHOLD
+  const breadthDirectional =
     breadth5dExpanding !== null
       ? breadth5dExpanding
       : rspChgPct !== null && spyChgPct !== null ? rspChgPct >= spyChgPct : false
+  const breadthRising = breadthAboveFloor && breadthDirectional
 
   // ── Assemble RatioCard array ──────────────────────────────────────────────
   const ratios: RatioCard[] = [
@@ -253,6 +295,7 @@ export function CrossAssetRatiosPanel({
                     : cuGold > 0.0015 ? 'Risk On'
                     : cuGold < 0.0012 ? 'Risk Off'
                     : 'Neutral',
+      source:       cuGoldSource,
     },
     {
       ...RATIOS_MOCK[1],
@@ -266,6 +309,7 @@ export function CrossAssetRatiosPanel({
                     : auAg > 80    ? 'Risk Off'
                     : auAg > 60    ? 'Neutral'
                     : 'Industrial',
+      source:       auAgSource,
     },
     {
       ...RATIOS_MOCK[2],

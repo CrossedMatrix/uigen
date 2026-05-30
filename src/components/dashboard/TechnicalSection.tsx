@@ -30,6 +30,14 @@ export interface RatioCard {
   signal: 'bullish' | 'bearish' | 'warning' | 'neutral'
   sparkline: number[]
   note: string
+  /**
+   * Data provenance badge shown beneath the ratio name.
+   * 'live_futures' → "● Live Futures" (green) — IBKR/primary feed
+   * 'alpaca_etf'   → "◈ Alpaca ETF Proxy" (amber) — ETF fallback active
+   * 'derived'      → "~ Derived" (slate) — β-projected / computed
+   * Omit (undefined) to show no badge.
+   */
+  source?: 'live_futures' | 'alpaca_etf' | 'derived'
 }
 
 // ─── Mock Data JSON ───────────────────────────────────────────────────────────
@@ -533,6 +541,24 @@ function MARow({ row }: { row: TechnicalRow }) {
 
 // ─── Ratio Card ───────────────────────────────────────────────────────────────
 
+/** Inline source-provenance chip for ratio cards. */
+function RatioSourceBadge({ source }: { source: RatioCard['source'] }) {
+  if (!source) return null
+  const cfg = {
+    live_futures: { label: '● Live Futures',     color: '#34d399', border: 'rgba(52,211,153,0.28)', bg: 'rgba(52,211,153,0.08)' },
+    alpaca_etf:   { label: '◈ Alpaca ETF Proxy', color: '#fbbf24', border: 'rgba(251,191,36,0.28)', bg: 'rgba(251,191,36,0.07)' },
+    derived:      { label: '~ Derived',          color: '#94a3b8', border: 'rgba(148,163,184,0.20)', bg: 'rgba(100,116,139,0.07)' },
+  }[source]
+  return (
+    <span
+      className="inline-flex items-center text-[9px] font-mono font-semibold tracking-wide px-1.5 py-0.5 rounded border leading-none"
+      style={{ color: cfg.color, borderColor: cfg.border, backgroundColor: cfg.bg }}
+    >
+      {cfg.label}
+    </span>
+  )
+}
+
 function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
   const col = SIG[ratio.signal]
   const isRisk   = ratio.id === 'risk_regime'
@@ -561,6 +587,11 @@ function RatioCardComponent({ ratio }: { ratio: RatioCard }) {
           {ratio.name}
         </div>
         <div className="text-[11px] text-slate-300">{ratio.subtitle}</div>
+        {ratio.source && (
+          <div className="mt-1">
+            <RatioSourceBadge source={ratio.source} />
+          </div>
+        )}
       </div>
 
       {/* Value row — fixed structural height maintained whether data is present or null */}
