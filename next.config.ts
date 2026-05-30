@@ -17,9 +17,17 @@ const nextConfig: NextConfig = {
   devIndicators: false,
   // Pin the workspace root so a stray yarn.lock or package.json elsewhere
   // on the learner's machine can't hijack Turbopack's module resolution.
-  turbopack: { root: process.cwd() },
-  // Treat @prisma/client as an external package to avoid tracing issues
-  // during server builds (Prisma's instrumentation can interfere with bundling).
+  // resolveAlias pins @prisma/client to its resolved path so Turbopack's
+  // module graph never attempts to trace into the .prisma/client engine
+  // binaries directory (bypasses the NFT directory trace error on Vercel).
+  turbopack: {
+    root: process.cwd(),
+    resolveAlias: {
+      '@prisma/client': require.resolve('@prisma/client'),
+    },
+  },
+  // Keep @prisma/client external so Next.js skips bundling it and avoids the
+  // NFT (nft-trace) directory scan that causes build errors on Vercel.
   serverExternalPackages: ['@prisma/client'],
 };
 
